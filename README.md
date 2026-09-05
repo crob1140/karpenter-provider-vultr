@@ -158,6 +158,107 @@ The implementation mitigates this by using Kubernetes bootstrap tokens rather th
 
 For higher-security environments, the next logical enhancement is an out-of-band bootstrap mechanism that avoids placing the bearer token in cloud user data entirely.
 
+## Support status
+
+This checklist records the provider's **current implementation status**, rather than the full set of features exposed by Karpenter. A checked item means the provider implements the capability; it does not necessarily mean that the capability has completed real-cluster production validation.
+
+### Core provisioning
+
+- [x] Karpenter v1.12.1 CloudProvider integration
+- [x] Dynamic NodePool provisioning from pending Pods
+- [x] VultrNodeClass resolution and readiness checks
+- [x] Vultr plan selection from NodePool/NodeClaim requirements
+- [x] Fixed plan selection via `VultrNodeClass.spec.plan`
+- [x] Multi-plan NodePool scheduling and cheapest compatible available plan selection
+- [x] Vultr regional plan availability filtering
+- [x] On-demand capacity
+- [x] AMD64 Linux nodes
+- [x] Vultr region exposed as a synthetic Karpenter zone
+- [x] CPU, memory, pod-count and ephemeral-storage capacity reporting
+- [x] Approximate hourly pricing derived from Vultr monthly pricing
+
+### Node lifecycle
+
+- [x] Instance creation
+- [x] NodeClaim provider ID generation and reconciliation
+- [x] Provider `Get` and `List` operations
+- [x] Instance deletion
+- [x] Idempotent handling of already-deleted Vultr instances
+- [x] Managed-instance identification using Karpenter tags
+- [x] Orphan-instance cleanup for instances whose NodeClaim disappears
+- [x] NodeClass drift detection
+- [ ] Real-cluster end-to-end provisioning and termination validation
+- [ ] Real-cluster failure/retry testing across bootstrap and Vultr API failures
+
+### Bootstrap
+
+- [x] Ubuntu/Debian-style Linux bootstrap
+- [x] kubeadm-based cluster join
+- [x] Short-lived Kubernetes bootstrap token
+- [x] CA-pinned kubeadm discovery
+- [x] Cloud-Init generation and Vultr user-data integration
+- [x] containerd and kubelet installation/configuration
+- [x] External cloud-provider mode for Vultr CCM
+- [x] Optional additional post-join user data
+- [ ] Non-kubeadm cluster bootstrap (k3s, RKE2, Talos, MicroK8s, etc.)
+- [ ] Managed VKE worker registration
+- [ ] Out-of-band bootstrap that avoids placing a bootstrap token in Vultr user data
+
+### NodeClass configuration
+
+- [x] Region
+- [x] Vultr OS image
+- [x] Snapshot-backed image source
+- [x] Kubernetes minor version selection for bootstrap
+- [x] Cluster API endpoint
+- [x] CA hash discovery/configuration
+- [x] SSH key IDs
+- [x] VPC IDs
+- [x] IPv6 enablement
+- [x] Additional bootstrap user data
+- [ ] Provider-managed kubelet/system-reservation configuration
+
+### Capacity and scheduling
+
+- [x] Vultr plan catalogue discovery
+- [x] Region-specific capacity availability discovery
+- [x] Plan and availability caching
+- [x] Stale-cache fallback for transient discovery failures
+- [x] Instance-type requirements
+- [x] Region and synthetic-zone requirements
+- [x] Capacity-type requirements for on-demand instances
+- [x] Pod resource-fit scheduling
+- [x] Unavailable offering filtering during scheduling
+- [x] Regression tests for fixed and multi-plan scheduling paths
+- [ ] Spot capacity
+- [ ] GPU plans / extended GPU resources
+- [ ] Reserved capacity
+- [ ] Vultr-specific instance attributes beyond the standard Karpenter requirements
+
+### Disruption and advanced lifecycle
+
+- [x] Provider-side drift detection
+- [x] Karpenter-compatible instance pricing for consolidation decisions
+- [ ] Production validation of consolidation
+- [ ] Production validation of drift replacement
+- [ ] Vultr-specific interruption handling
+- [ ] Provider repair policies / automatic node repair
+- [ ] Provider-specific disruption reasons
+
+### Operational readiness
+
+- [x] Unit tests for Vultr API and provider logic
+- [x] Scheduler regression tests
+- [x] Deterministic plan selection when prices tie
+- [x] API error translation for common lifecycle operations
+- [ ] Real Vultr/Kubernetes integration test suite
+- [ ] Automated end-to-end provisioning test in CI
+- [ ] Documented upgrade/compatibility policy for supported Kubernetes and Karpenter versions
+- [ ] Production deployment/upgrade runbook
+- [ ] Prometheus metrics and provider-specific operational dashboards
+
+> **Production-readiness note:** this project should not be considered production-ready solely because the automated tests pass. The remaining unchecked lifecycle and integration items are intentionally tracked here until they have been exercised against a real Vultr-backed Kubernetes cluster.
+
 ## Files
 
 - `pkg/bootstrap/bootstrap.go` — token management, CA hashing and Cloud-Init generation
