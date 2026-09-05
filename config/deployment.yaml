@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: karpenter-provider-vultr
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: karpenter-provider-vultr
+  template:
+    metadata:
+      labels:
+        app: karpenter-provider-vultr
+    spec:
+      serviceAccountName: karpenter-provider-vultr
+      containers:
+        - name: controller
+          image: ghcr.io/yourname/karpenter-provider-vultr:dev
+          env:
+            - name: VULTR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vultr-api-key
+                  key: api-key

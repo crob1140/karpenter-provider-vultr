@@ -1,0 +1,12 @@
+image:
+  repository: ghcr.io/yourname/karpenter-provider-vultr
+  tag: dev
+  pullPolicy: IfNotPresent
+
+apiKeySecret:
+  name: vultr-api-key
+  key: api-key
+
+serviceAccount:
+  create: true
+  name: karpenter-provider-vultr

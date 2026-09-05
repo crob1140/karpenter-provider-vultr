@@ -1,0 +1,306 @@
+package cloudprovider
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/awslabs/operatorpkg/status"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	karpcloud "sigs.k8s.io/karpenter/pkg/cloudprovider"
+
+	vultrv1 "github.com/crob1140/karpenter-provider-vultr/pkg/apis/v1alpha1"
+	"github.com/crob1140/karpenter-provider-vultr/pkg/vultr"
+)
+
+var _ karpcloud.CloudProvider = (*CloudProvider)(nil)
+
+type CloudProvider struct {
+	kubeClient client.Client
+	vultr      *vultr.Client
+}
+
+func New(kubeClient client.Client, vultrClient *vultr.Client) *CloudProvider {
+	return &CloudProvider{
+		kubeClient: kubeClient,
+		vultr:      vultrClient,
+	}
+}
+
+func (c *CloudProvider) Name() string {
+	return "vultr"
+}
+
+func (c *CloudProvider) GetSupportedNodeClasses() []status.Object {
+	return []status.Object{&vultrv1.VultrNodeClass{}}
+}
+
+func (c *CloudProvider) RepairPolicies() []karpcloud.RepairPolicy {
+	return nil
+}
+
+func (c *CloudProvider) DisruptionReasons() []karpv1.DisruptionReason {
+	return nil
+}
+
+func (c *CloudProvider) nodeClass(ctx context.Context, ref *karpv1.NodeClassReference) (*vultrv1.VultrNodeClass, error) {
+	if ref == nil {
+		return nil, fmt.Errorf("NodeClassRef is nil")
+	}
+	if ref.Group != vultrv1.GroupVersion.Group || ref.Kind != "VultrNodeClass" {
+		return nil, fmt.Errorf("unsupported NodeClassRef %s/%s", ref.Group, ref.Kind)
+	}
+
+	nc := &vultrv1.VultrNodeClass{}
+	if err := c.kubeClient.Get(ctx, types.NamespacedName{Name: ref.Name}, nc); err != nil {
+		return nil, err
+	}
+
+	if !nc.DeletionTimestamp.IsZero() {
+		return nil, apierrors.NewNotFound(
+			schema.GroupResource{
+				Group:    vultrv1.GroupVersion.Group,
+				Resource: "vultrnodeclasses",
+			},
+			nc.Name,
+		)
+	}
+
+	return nc, nil
+}
+
+func (c *CloudProvider) Create(ctx context.Context, nc *karpv1.NodeClaim) (*karpv1.NodeClaim, error) {
+	nodeClass, err := c.nodeClass(ctx, nc.Spec.NodeClassRef)
+	if err != nil {
+		return nil, fmt.Errorf("resolving NodeClass: %w", err)
+	}
+
+	if ready := nodeClass.StatusConditions().Get(status.ConditionReady); ready != nil && ready.IsFalse() {
+		return nil, karpcloud.NewNodeClassNotReadyError(
+			fmt.Errorf("NodeClass is not ready: %s", ready.Message),
+		)
+	}
+
+	plan, err := planFromNodeClaim(nc, nodeClass.Spec.Plan)
+	if err != nil {
+		return nil, err
+	}
+
+	userData := nodeClass.Spec.UserData
+	if userData == "" {
+		return nil, karpcloud.NewCreateError(
+			fmt.Errorf("spec.userData is required until provider bootstrap is implemented"),
+			"UserDataRequired",
+			"Set VultrNodeClass.spec.userData to a bootstrap script",
+		)
+	}
+
+	instance, err := c.vultr.CreateInstance(ctx, vultr.CreateInstanceRequest{
+		Region:      nodeClass.Spec.Region,
+		Plan:        plan,
+		OSID:        nodeClass.Spec.OSID,
+		SnapshotID:  nodeClass.Spec.SnapshotID,
+		Hostname:    nc.Name,
+		Label:       nc.Name,
+		SSHKeyIDs:   nodeClass.Spec.SSHKeyIDs,
+		VPCIDs:       nodeClass.Spec.VPCIDs,
+		UserData:    userData,
+		EnableIPv6:  nodeClass.Spec.EnableIPv6 != nil && *nodeClass.Spec.EnableIPv6,
+		Tags: []string{
+			fmt.Sprintf("karpenter-nodeclaim=%s", nc.Name),
+			fmt.Sprintf("karpenter-nodepool=%s", nc.Labels[karpv1.NodePoolLabelKey]),
+			fmt.Sprintf("karpenter-nodeclass=%s", nodeClass.Name),
+		},
+	})
+	if err != nil {
+		return nil, karpcloud.NewCreateError(
+			err,
+			"InstanceCreateFailed",
+			"Vultr instance creation failed",
+		)
+	}
+
+	return instanceToNodeClaim(instance, nc, nodeClass), nil
+}
+
+func (c *CloudProvider) Delete(ctx context.Context, nc *karpv1.NodeClaim) error {
+	id, err := parseProviderID(nc.Status.ProviderID)
+	if err != nil {
+		return err
+	}
+
+	if err := c.vultr.DeleteInstance(ctx, id); err != nil {
+		if isNotFoundError(err) {
+			return karpcloud.NewNodeClaimNotFoundError(err)
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (c *CloudProvider) Get(ctx context.Context, providerID string) (*karpv1.NodeClaim, error) {
+	id, err := parseProviderID(providerID)
+	if err != nil {
+		return nil, err
+	}
+
+	instance, err := c.vultr.GetInstance(ctx, id)
+	if err != nil {
+		if isNotFoundError(err) {
+			return nil, karpcloud.NewNodeClaimNotFoundError(err)
+		}
+		return nil, err
+	}
+
+	return instanceToNodeClaim(instance, nil, nil), nil
+}
+
+func (c *CloudProvider) List(ctx context.Context) ([]*karpv1.NodeClaim, error) {
+	instances, err := c.vultr.ListInstances(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]*karpv1.NodeClaim, 0, len(instances))
+	for i := range instances {
+		if !managed(&instances[i]) {
+			continue
+		}
+		out = append(out, instanceToNodeClaim(&instances[i], nil, nil))
+	}
+
+	return out, nil
+}
+
+func (c *CloudProvider) GetInstanceTypes(ctx context.Context, np *karpv1.NodePool) ([]*karpcloud.InstanceType, error) {
+	ref := np.Spec.Template.Spec.NodeClassRef
+	nc, err := c.nodeClass(ctx, ref)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return vultr.BuildInstanceTypes(ctx, c.vultr, nc.Spec.Region)
+}
+
+func (c *CloudProvider) IsDrifted(ctx context.Context, nc *karpv1.NodeClaim) (karpcloud.DriftReason, error) {
+	nodeClass, err := c.nodeClass(ctx, nc.Spec.NodeClassRef)
+	if err != nil {
+		return "", client.IgnoreNotFound(err)
+	}
+
+	if nc.Annotations[vultrv1.NodeClassHashAnnotation] != nodeClass.Hash() {
+		return karpcloud.DriftReason("VultrNodeClassDrifted"), nil
+	}
+
+	return "", nil
+}
+
+func parseProviderID(providerID string) (string, error) {
+	const prefix = "vultr://"
+
+	if !strings.HasPrefix(providerID, prefix) {
+		return "", fmt.Errorf("invalid Vultr provider ID %q", providerID)
+	}
+
+	id := strings.TrimPrefix(providerID, prefix)
+	if id == "" {
+		return "", fmt.Errorf("invalid Vultr provider ID %q", providerID)
+	}
+
+	return id, nil
+}
+
+func managed(i *vultr.Instance) bool {
+	for _, t := range i.Tags {
+		if strings.HasPrefix(t, "karpenter-nodeclaim=") {
+			return true
+		}
+	}
+	return false
+}
+
+func planFromNodeClaim(nc *karpv1.NodeClaim, configuredPlan string) (string, error) {
+	if configuredPlan != "" {
+		return configuredPlan, nil
+	}
+
+	for _, requirement := range nc.Spec.Requirements {
+		if requirement.Key != corev1.LabelInstanceTypeStable {
+			continue
+		}
+
+		if len(requirement.Values) == 1 && requirement.Values[0] != "" {
+			return requirement.Values[0], nil
+		}
+
+		if len(requirement.Values) == 0 {
+			return "", karpcloud.NewCreateError(
+				fmt.Errorf("instance-type requirement has no values"),
+				"PlanNotSelected",
+				"No Vultr plan was selected by the NodePool requirements",
+			)
+		}
+
+		return "", karpcloud.NewCreateError(
+			fmt.Errorf("instance-type requirement contains multiple values: %v", requirement.Values),
+			"PlanNotSelected",
+			"Vultr requires a single selected plan when creating a NodeClaim",
+		)
+	}
+
+	return "", karpcloud.NewCreateError(
+		fmt.Errorf("no instance-type requirement found"),
+		"PlanNotSelected",
+		"No Vultr plan was selected by the NodePool requirements",
+	)
+}
+
+func isNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return apierrors.IsNotFound(err)
+}
+
+func instanceToNodeClaim(i *vultr.Instance, original *karpv1.NodeClaim, nc *vultrv1.VultrNodeClass) *karpv1.NodeClaim {
+	labels := map[string]string{
+		corev1.LabelInstanceTypeStable: i.Plan,
+		corev1.LabelTopologyRegion:     i.Region,
+		corev1.LabelArchStable:         "amd64",
+		corev1.LabelOSStable:           "linux",
+		karpv1.CapacityTypeLabelKey:    karpv1.CapacityTypeOnDemand,
+	}
+
+	if original != nil {
+		if nodePool := original.Labels[karpv1.NodePoolLabelKey]; nodePool != "" {
+			labels[karpv1.NodePoolLabelKey] = nodePool
+		}
+	}
+
+	result := &karpv1.NodeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: labels,
+		},
+		Status: karpv1.NodeClaimStatus{
+			ProviderID: "vultr://" + i.ID,
+		},
+	}
+
+	if nc != nil {
+		result.Annotations = map[string]string{
+			vultrv1.NodeClassHashAnnotation: nc.Hash(),
+		}
+	}
+
+	return result
+}

@@ -1,0 +1,14 @@
+apiVersion: karpenter.vultr.com/v1alpha1
+kind: VultrNodeClass
+metadata:
+  name: default
+spec:
+  region: syd
+  osID: 1743
+  # Optional; use the exact SSH key IDs from your Vultr account.
+  sshKeyIDs: []
+  # Optional VPC IDs.
+  vpcIDs: []
+  # This is intentionally explicit in the first skeleton. We will generate this
+  # automatically once the cluster bootstrap contract is decided.
+  userData: ""

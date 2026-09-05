@@ -1,0 +1,26 @@
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: vultr
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: karpenter.vultr.com
+        kind: VultrNodeClass
+        name: default
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+        - key: kubernetes.io/os
+          operator: In
+          values: [linux]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: [vc2-1c-1gb, vc2-1c-2gb, vc2-2c-4gb]
+  limits:
+    cpu: "16"
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m

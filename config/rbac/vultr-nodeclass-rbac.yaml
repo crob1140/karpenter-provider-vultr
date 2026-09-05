@@ -1,0 +1,24 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: karpenter-provider-vultr
+rules:
+  - apiGroups: ["karpenter.vultr.com"]
+    resources: ["vultrnodeclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["karpenter.vultr.com"]
+    resources: ["vultrnodeclasses/status"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: karpenter-provider-vultr
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: karpenter-provider-vultr
+subjects:
+  - kind: ServiceAccount
+    name: karpenter-provider-vultr
+    namespace: kube-system
