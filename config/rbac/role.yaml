@@ -1,0 +1,13 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: karpenter-provider-vultr-bootstrap
+  namespace: kube-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["kube-root-ca.crt"]
+    verbs: ["get"]

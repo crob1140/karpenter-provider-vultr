@@ -16,7 +16,7 @@ spec:
       serviceAccountName: karpenter-provider-vultr
       containers:
         - name: controller
-          image: ghcr.io/yourname/karpenter-provider-vultr:dev
+          image: ghcr.io/crob1140/karpenter-provider-vultr:dev
           env:
             - name: VULTR_API_KEY
               valueFrom:

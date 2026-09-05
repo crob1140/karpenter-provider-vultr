@@ -22,3 +22,26 @@ subjects:
   - kind: ServiceAccount
     name: karpenter-provider-vultr
     namespace: kube-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: karpenter-provider-vultr-nodeclaim-read
+rules:
+  - apiGroups: ["karpenter.sh"]
+    resources: ["nodeclaims"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: karpenter-provider-vultr-nodeclaim-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: karpenter-provider-vultr-nodeclaim-read
+subjects:
+  - kind: ServiceAccount
+    name: karpenter-provider-vultr
+    namespace: kube-system

@@ -18,7 +18,6 @@ func (in *VultrNodeClass) SetConditions(conditions []status.Condition) {
 		in.Status.Conditions[i] = metav1.Condition(conditions[i])
 	}
 }
-
 func (in *VultrNodeClass) StatusConditions() status.ConditionSet {
 	return status.NewReadyConditions().For(in)
 }

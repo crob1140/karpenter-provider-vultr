@@ -9,6 +9,8 @@ spec:
         group: karpenter.vultr.com
         kind: VultrNodeClass
         name: default
+      # VultrNodeClass.spec.plan may be left empty. In that case Karpenter can choose
+      # among all of the plans below that are available in the configured region.
       requirements:
         - key: kubernetes.io/arch
           operator: In

@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/yourname/karpenter-provider-vultr
+  repository: ghcr.io/crob1140/karpenter-provider-vultr
   tag: dev
   pullPolicy: IfNotPresent
 

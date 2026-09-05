@@ -1,4 +1,4 @@
-IMAGE ?= github.com/crob1140/karpenter-provider-vultr:dev
+IMAGE ?= ghcr.io/crob1140/karpenter-provider-vultr:dev
 CONTROLLER_GEN ?= controller-gen
 
 .PHONY: build test generate docker-build manifests
@@ -19,5 +19,6 @@ manifests:
 	kubectl apply -f config/crd/vultrnodeclass.yaml
 	kubectl apply -f config/rbac/serviceaccount.yaml
 	kubectl apply -f config/rbac/vultr-nodeclass-rbac.yaml
-	kubectl apply -f config/rbac/api-key-secret.example.yaml
+	kubectl apply -f config/rbac/role.yaml
+	kubectl apply -f config/rbac/rolebinding.yaml
 	kubectl apply -f config/deployment.yaml

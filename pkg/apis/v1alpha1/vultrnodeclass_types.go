@@ -35,9 +35,25 @@ type VultrNodeClassSpec struct {
 	// +optional
 	VPCIDs []string `json:"vpcIDs,omitempty"`
 
-	// UserData is base64-encoded user-data passed to Vultr. If omitted, the provider generates bootstrap data.
+	// KubernetesVersion is the Kubernetes minor version used to install kubeadm and kubelet.
+	// Use the same minor version as the control plane, for example v1.35.
+	// +kubebuilder:validation:Pattern=`^v?1\.[0-9]+(?:\.[0-9]+)?$`
+	KubernetesVersion string `json:"kubernetesVersion"`
+
+	// ClusterEndpoint is the externally reachable Kubernetes API server endpoint,
+	// for example https://k8s.example.com:6443.
+	// +kubebuilder:validation:MinLength=1
+	ClusterEndpoint string `json:"clusterEndpoint"`
+
+	// CACertHash optionally overrides the CA hash calculated from kube-system/kube-root-ca.crt.
+	// Format: sha256:<64 hex characters>.
 	// +optional
-	UserData string `json:"userData,omitempty"`
+	CACertHash string `json:"caCertHash,omitempty"`
+
+	// ExtraUserData is an optional shell script executed after kubeadm join succeeds.
+	// It is intended for provider-specific node customization, not cluster bootstrap.
+	// +optional
+	ExtraUserData string `json:"extraUserData,omitempty"`
 
 	// EnableIPv6 controls whether Vultr assigns IPv6 networking.
 	// +optional
@@ -47,6 +63,12 @@ type VultrNodeClassSpec struct {
 type VultrNodeClassStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// ResolvedPlanIDs is the set of Vultr plans currently reported as available
+	// in the configured region. It is informational and may change independently
+	// of the NodeClass spec.
+	// +optional
+	ResolvedPlanIDs []string `json:"resolvedPlanIDs,omitempty"`
 
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

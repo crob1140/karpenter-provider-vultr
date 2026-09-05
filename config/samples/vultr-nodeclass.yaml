@@ -5,10 +5,10 @@ metadata:
 spec:
   region: syd
   osID: 1743
-  # Optional; use the exact SSH key IDs from your Vultr account.
+  kubernetesVersion: v1.35
+  # Must be reachable from Vultr worker instances.
+  clusterEndpoint: https://kubernetes.example.com:6443
+  # Optional when kube-system/kube-root-ca.crt is available.
+  # caCertHash: sha256:<64-hex-character-SPKI-hash>
   sshKeyIDs: []
-  # Optional VPC IDs.
   vpcIDs: []
-  # This is intentionally explicit in the first skeleton. We will generate this
-  # automatically once the cluster bootstrap contract is decided.
-  userData: ""

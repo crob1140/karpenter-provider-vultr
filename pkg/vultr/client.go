@@ -3,18 +3,39 @@ package vultr
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 )
 
-const defaultBaseURL = "https://api.vultr.com/v2"
+const (
+	defaultBaseURL = "https://api.vultr.com/v2"
+	maxPageSize    = 500
+)
 
 type Client struct {
 	http            *http.Client
 	baseURL, apiKey string
+}
+
+type APIError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("Vultr API %s %s: HTTP %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
+}
+func (e *APIError) NotFound() bool { return e.StatusCode == http.StatusNotFound }
+func (e *APIError) Retryable() bool {
+	return e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500
 }
 
 func NewClient(apiKey string) *Client {
@@ -28,19 +49,52 @@ func NewClientWithBaseURL(apiKey, baseURL string, httpClient *http.Client) *Clie
 }
 
 type Plan struct {
-	ID          string  `json:"id"`
-	VCPUCount   int     `json:"vcpu_count"`
-	RAM         int     `json:"ram"`
-	MonthlyCost float64 `json:"monthly_cost"`
+	ID          string   `json:"id"`
+	VCPUCount   int      `json:"vcpu_count"`
+	RAM         int      `json:"ram"`
+	Disk        int      `json:"disk"`
+	Bandwidth   int      `json:"bandwidth"`
+	MonthlyCost float64  `json:"monthly_cost"`
+	Type        string   `json:"type"`
+	Locations   []string `json:"locations"`
 }
+
 type planResponse struct {
 	Plans []Plan `json:"plans"`
+	Meta  Meta   `json:"meta"`
 }
+
+type PlanAvailability struct {
+	AvailablePlans []string `json:"available_plans"`
+}
+
+type OperatingSystem struct {
+	ID     int    `json:"id"`
+	Name   string `json:"name"`
+	Arch   string `json:"arch"`
+	Family string `json:"family"`
+}
+
+type osResponse struct {
+	OS   []OperatingSystem `json:"os"`
+	Meta Meta              `json:"meta"`
+}
+
 type instanceResponse struct {
 	Instance Instance `json:"instance"`
 }
 type instancesResponse struct {
 	Instances []Instance `json:"instances"`
+	Meta      Meta       `json:"meta"`
+}
+
+type Meta struct {
+	Total int    `json:"total"`
+	Links *Links `json:"links"`
+}
+type Links struct {
+	Next string `json:"next"`
+	Prev string `json:"prev"`
 }
 
 type Instance struct {
@@ -71,6 +125,10 @@ type CreateInstanceRequest struct {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
+	return c.doURL(ctx, method, c.baseURL+path, body, out)
+}
+
+func (c *Client) doURL(ctx context.Context, method, rawURL string, body any, out any) error {
 	var r io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -79,7 +137,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		}
 		r = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, r)
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, r)
 	if err != nil {
 		return err
 	}
@@ -95,7 +153,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("Vultr API %s %s: HTTP %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(b)))
+		return &APIError{Method: method, Path: rawURL, StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(b))}
 	}
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
@@ -104,28 +162,115 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 }
 
 func (c *Client) ListPlans(ctx context.Context) ([]Plan, error) {
-	var out planResponse
-	if err := c.do(ctx, http.MethodGet, "/plans", nil, &out); err != nil {
+	var result []Plan
+	cursor := ""
+	for {
+		path := "/plans?per_page=" + strconv.Itoa(maxPageSize)
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		var out planResponse
+		if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+			return nil, err
+		}
+		result = append(result, out.Plans...)
+		next := ""
+		if out.Meta.Links != nil {
+			next = out.Meta.Links.Next
+		}
+		if next == "" {
+			return result, nil
+		}
+		cursor = cursorFromNext(next)
+		if cursor == "" {
+			return nil, fmt.Errorf("Vultr returned an unparseable plans pagination link %q", next)
+		}
+	}
+}
+
+func (c *Client) ListOS(ctx context.Context) ([]OperatingSystem, error) {
+	var result []OperatingSystem
+	cursor := ""
+	for {
+		path := "/os?per_page=" + strconv.Itoa(maxPageSize)
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		var out osResponse
+		if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+			return nil, err
+		}
+		result = append(result, out.OS...)
+		next := ""
+		if out.Meta.Links != nil {
+			next = out.Meta.Links.Next
+		}
+		if next == "" {
+			return result, nil
+		}
+		cursor = cursorFromNext(next)
+		if cursor == "" {
+			return nil, fmt.Errorf("Vultr returned an unparseable OS pagination link %q", next)
+		}
+	}
+}
+
+func (c *Client) GetRegionAvailability(ctx context.Context, region string) (*PlanAvailability, error) {
+	var out PlanAvailability
+	if err := c.do(ctx, http.MethodGet, "/regions/"+url.PathEscape(region)+"/availability", nil, &out); err != nil {
 		return nil, err
 	}
-	return out.Plans, nil
+	return &out, nil
 }
+
 func (c *Client) GetInstance(ctx context.Context, id string) (*Instance, error) {
 	var out instanceResponse
-	if err := c.do(ctx, http.MethodGet, "/instances/"+id, nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/instances/"+url.PathEscape(id), nil, &out); err != nil {
 		return nil, err
 	}
 	return &out.Instance, nil
 }
+
 func (c *Client) ListInstances(ctx context.Context) ([]Instance, error) {
-	var out instancesResponse
-	if err := c.do(ctx, http.MethodGet, "/instances", nil, &out); err != nil {
-		return nil, err
+	var result []Instance
+	cursor := ""
+	for {
+		path := "/instances?per_page=" + strconv.Itoa(maxPageSize)
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		var out instancesResponse
+		if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+			return nil, err
+		}
+		result = append(result, out.Instances...)
+		next := ""
+		if out.Meta.Links != nil {
+			next = out.Meta.Links.Next
+		}
+		if next == "" {
+			return result, nil
+		}
+		cursor = cursorFromNext(next)
+		if cursor == "" {
+			return nil, fmt.Errorf("Vultr returned an unparseable instances pagination link %q", next)
+		}
 	}
-	return out.Instances, nil
 }
+
+func cursorFromNext(next string) string {
+	u, err := url.Parse(next)
+	if err != nil {
+		return ""
+	}
+	return u.Query().Get("cursor")
+}
+
 func (c *Client) CreateInstance(ctx context.Context, req CreateInstanceRequest) (*Instance, error) {
-	payload := map[string]any{"region": req.Region, "plan": req.Plan, "hostname": req.Hostname, "label": req.Label, "sshkey_ids": req.SSHKeyIDs, "vpc_ids": req.VPCIDs, "user_data": req.UserData, "enable_ipv6": req.EnableIPv6, "tags": req.Tags}
+	payload := map[string]any{"region": req.Region, "plan": req.Plan, "hostname": req.Hostname, "label": req.Label, "sshkey_ids": req.SSHKeyIDs, "vpc_ids": req.VPCIDs, "enable_ipv6": req.EnableIPv6, "tags": req.Tags}
+	if req.UserData != "" {
+		payload["user_data"] = base64.StdEncoding.EncodeToString([]byte(req.UserData))
+	}
 	if req.OSID != nil {
 		payload["os_id"] = *req.OSID
 	}
@@ -138,6 +283,7 @@ func (c *Client) CreateInstance(ctx context.Context, req CreateInstanceRequest) 
 	}
 	return &out.Instance, nil
 }
+
 func (c *Client) DeleteInstance(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodDelete, "/instances/"+id, nil, nil)
+	return c.do(ctx, http.MethodDelete, "/instances/"+url.PathEscape(id), nil, nil)
 }

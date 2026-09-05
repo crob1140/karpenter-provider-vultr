@@ -11,14 +11,25 @@ import (
 func (in *VultrNodeClass) DeepCopyInto(out *VultrNodeClass) {
 	*out = *in
 	out.ObjectMeta = *in.ObjectMeta.DeepCopy()
+	if in.Spec.OSID != nil {
+		out.Spec.OSID = new(int)
+		*out.Spec.OSID = *in.Spec.OSID
+	}
 	if in.Spec.SSHKeyIDs != nil {
 		out.Spec.SSHKeyIDs = append([]string(nil), in.Spec.SSHKeyIDs...)
 	}
 	if in.Spec.VPCIDs != nil {
 		out.Spec.VPCIDs = append([]string(nil), in.Spec.VPCIDs...)
 	}
+	if in.Spec.EnableIPv6 != nil {
+		out.Spec.EnableIPv6 = new(bool)
+		*out.Spec.EnableIPv6 = *in.Spec.EnableIPv6
+	}
 	if in.Status.Conditions != nil {
 		out.Status.Conditions = append([]metav1.Condition(nil), in.Status.Conditions...)
+	}
+	if in.Status.ResolvedPlanIDs != nil {
+		out.Status.ResolvedPlanIDs = append([]string(nil), in.Status.ResolvedPlanIDs...)
 	}
 }
 func (in *VultrNodeClass) DeepCopy() *VultrNodeClass {

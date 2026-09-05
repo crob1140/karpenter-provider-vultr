@@ -21,7 +21,8 @@ func main() {
 		panic("VULTR_API_KEY is required")
 	}
 
-	rawProvider := vultrprovider.New(op.GetClient(), vultr.NewClient(apiKey))
+	vultrClient := vultr.NewClient(apiKey)
+	rawProvider := vultrprovider.New(op.GetClient(), vultrClient)
 	decoratedProvider := metrics.Decorate(rawProvider)
 	cloudProvider := overlay.Decorate(decoratedProvider, op.GetClient(), op.InstanceTypeStore)
 	clusterState := state.NewCluster(op.Clock, op.GetClient(), cloudProvider)
@@ -29,7 +30,10 @@ func main() {
 	op.WithControllers(ctx,
 		controllers.NewControllers(ctx, op.Manager, op.Clock, op.GetClient(), op.EventRecorder, cloudProvider, rawProvider, clusterState, op.InstanceTypeStore)...,
 	)
-	if err := vultrcontrollers.NewNodeClassController(op.GetClient()).SetupWithManager(op.Manager); err != nil {
+	if err := vultrcontrollers.NewNodeClassController(op.GetClient(), vultrClient).SetupWithManager(op.Manager); err != nil {
+		panic(err)
+	}
+	if err := vultrcontrollers.NewOrphanController(op.GetClient(), vultrClient).SetupWithManager(op.Manager); err != nil {
 		panic(err)
 	}
 	op.Start(ctx)

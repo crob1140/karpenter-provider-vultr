@@ -22,7 +22,7 @@ spec:
           properties:
             spec:
               type: object
-              required: [region]
+              required: [region, kubernetesVersion, clusterEndpoint]
               properties:
                 region: {type: string, minLength: 1}
                 osID: {type: integer}
@@ -30,11 +30,19 @@ spec:
                 plan: {type: string}
                 sshKeyIDs: {type: array, items: {type: string}}
                 vpcIDs: {type: array, items: {type: string}}
-                userData: {type: string}
+                kubernetesVersion:
+                  type: string
+                  pattern: '^v?1\.[0-9]+(?:\.[0-9]+)?$'
+                clusterEndpoint: {type: string, minLength: 1}
+                caCertHash: {type: string}
+                extraUserData: {type: string}
                 enableIPv6: {type: boolean}
             status:
               type: object
               properties:
+                resolvedPlanIDs:
+                  type: array
+                  items: {type: string}
                 observedGeneration: {type: integer, format: int64}
                 conditions:
                   type: array
