@@ -1,0 +1,34 @@
+services:
+  integration-tests:
+    image: golang:1.26-bookworm
+
+    working_dir: /workspace
+
+    volumes:
+      - .:/workspace
+
+    environment:
+      VULTR_INTEGRATION_TESTS: "1"
+
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+
+        echo "==> Go version"
+        go version
+
+        echo "==> Installing setup-envtest..."
+        GOBIN=/tmp/bin go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+
+        echo "==> Locating Kubernetes 1.35 envtest assets..."
+        export KUBEBUILDER_ASSETS=$$(/tmp/bin/setup-envtest use 1.35.x -p path)
+
+        echo "==> KUBEBUILDER_ASSETS=$${KUBEBUILDER_ASSETS}"
+
+        echo "==> Envtest assets:"
+        ls -la "$${KUBEBUILDER_ASSETS}"
+
+        echo "==> Running integration tests..."
+        make test-integration

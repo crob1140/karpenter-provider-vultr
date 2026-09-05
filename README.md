@@ -251,8 +251,10 @@ This checklist records the provider's **current implementation status**, rather 
 - [x] Scheduler regression tests
 - [x] Deterministic plan selection when prices tie
 - [x] API error translation for common lifecycle operations
+- [x] Kubernetes envtest lifecycle coverage using a fake Vultr API
+- [x] Automated envtest integration test in CI
 - [ ] Real Vultr/Kubernetes integration test suite
-- [ ] Automated end-to-end provisioning test in CI
+- [ ] Automated end-to-end provisioning test against real Vultr capacity in CI
 - [ ] Documented upgrade/compatibility policy for supported Kubernetes and Karpenter versions
 - [ ] Production deployment/upgrade runbook
 - [ ] Prometheus metrics and provider-specific operational dashboards
@@ -267,6 +269,8 @@ This checklist records the provider's **current implementation status**, rather 
 - `config/rbac/role.yaml` — permission to manage bootstrap tokens
 - `config/rbac/rolebinding.yaml` — binds those permissions to the provider
 - `config/samples/vultr-nodeclass.yaml` — example NodeClass
+- `pkg/integration/cloudprovider_test.go` — opt-in envtest lifecycle test with a fake Vultr API
+- `.github/workflows/test.yaml` — unit and envtest CI
 
 ## NodeClaim lifecycle and failed bootstrap handling
 
@@ -283,6 +287,34 @@ There is also a provider-specific orphan controller. It scans only instances car
 The 20-minute orphan grace period is intentionally longer than the expected node registration window. It should be shortened only after measuring real bootstrap times in the target Vultr region/image.
 
 The provider also keeps bootstrap failures out of the Vultr API credentials path: Cloud-Init never receives the Vultr API key. A kubeadm bootstrap token is the only cluster credential embedded in user-data, and it is short-lived.
+
+## Integration testing
+
+The repository contains an opt-in Kubernetes `envtest` suite under `pkg/integration`. It starts a real Kubernetes API server and etcd, installs the provider CRD, uses the real `CloudProvider` implementation, and points the Vultr client at an in-process fake Vultr API. The current integration test exercises the most important launch lifecycle boundary:
+
+1. resolve a `VultrNodeClass` from the Kubernetes API;
+2. discover a compatible and region-available Vultr plan;
+3. calculate the cluster CA hash;
+4. create a short-lived bootstrap token Secret;
+5. render and submit base64-encoded Cloud-Init to the Vultr API;
+6. translate the returned Vultr instance into a Karpenter `NodeClaim`; and
+7. delete the created Vultr instance through the provider lifecycle.
+
+The suite does **not** start kubelet, kubeadm, Vultr CCM, or an actual Vultr VM. Real-cluster provisioning, bootstrap success, node registration, consolidation, drift replacement, and failure recovery therefore remain production-validation work.
+
+Run the normal unit suite with:
+
+```bash
+go test ./...
+```
+
+Run the envtest suite with Kubernetes test assets installed:
+
+```bash
+make test-integration
+```
+
+The CI workflow installs the controller-runtime `setup-envtest` helper and runs this integration suite automatically. The real Vultr E2E suite remains intentionally separate because it requires cloud credentials, a reachable Kubernetes control plane, and paid/real infrastructure.
 
 ## Current limitations
 

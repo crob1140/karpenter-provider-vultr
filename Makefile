@@ -1,12 +1,15 @@
 IMAGE ?= ghcr.io/crob1140/karpenter-provider-vultr:dev
 CONTROLLER_GEN ?= controller-gen
 
-.PHONY: build test generate docker-build manifests
+.PHONY: build test test-integration generate docker-build manifests
 build:
 	go build ./cmd/controller
 
 test:
 	go test ./...
+
+test-integration:
+	go test ./pkg/integration/...
 
 generate:
 	$(CONTROLLER_GEN) object paths="./pkg/apis/..."

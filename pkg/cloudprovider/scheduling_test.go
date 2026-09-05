@@ -39,7 +39,6 @@ func TestSchedulerFiltersUnavailableVultrOffering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	scheduler := provisioningscheduling.NewScheduler(ctx, client, []*karpv1.NodePool{np}, cluster, nil, topology, instanceTypes, nil, nil, clock.RealClock{}, nil)
 
 	pod := &corev1.Pod{
@@ -133,65 +132,24 @@ func testInstanceType(name string, price float64, available bool) *karpcloud.Ins
 	return &karpcloud.InstanceType{
 		Name: name,
 		Requirements: scheduling.NewRequirements(
-			scheduling.NewRequirement(
-				corev1.LabelInstanceTypeStable,
-				corev1.NodeSelectorOpIn,
-				name,
-			),
-			scheduling.NewRequirement(
-				corev1.LabelArchStable,
-				corev1.NodeSelectorOpIn,
-				"amd64",
-			),
-			scheduling.NewRequirement(
-				corev1.LabelOSStable,
-				corev1.NodeSelectorOpIn,
-				"linux",
-			),
-			scheduling.NewRequirement(
-				corev1.LabelTopologyRegion,
-				corev1.NodeSelectorOpIn,
-				"syd",
-			),
-			scheduling.NewRequirement(
-				corev1.LabelTopologyZone,
-				corev1.NodeSelectorOpIn,
-				"syd",
-			),
+			scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, name),
+			scheduling.NewRequirement(corev1.LabelArchStable, corev1.NodeSelectorOpIn, "amd64"),
+			scheduling.NewRequirement(corev1.LabelOSStable, corev1.NodeSelectorOpIn, "linux"),
 		),
 		Capacity: corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse("2000m"),
-			corev1.ResourceMemory: resource.MustParse("4Gi"),
-			corev1.ResourcePods:   resource.MustParse("110"),
+			corev1.ResourceCPU:    *resource.NewMilliQuantity(500, resource.DecimalSI),
+			corev1.ResourceMemory: *resource.NewQuantity(4096*1024*1024, resource.BinarySI),
+			corev1.ResourcePods:   *resource.NewQuantity(110, resource.DecimalSI),
 		},
-		Overhead: &karpcloud.InstanceTypeOverhead{
-			KubeReserved:      corev1.ResourceList{},
-			SystemReserved:    corev1.ResourceList{},
-			EvictionThreshold: corev1.ResourceList{},
-		},
-		Offerings: karpcloud.Offerings{
-			{
-				Requirements: scheduling.NewRequirements(
-					scheduling.NewRequirement(
-						karpv1.CapacityTypeLabelKey,
-						corev1.NodeSelectorOpIn,
-						karpv1.CapacityTypeOnDemand,
-					),
-					scheduling.NewRequirement(
-						corev1.LabelTopologyRegion,
-						corev1.NodeSelectorOpIn,
-						"syd",
-					),
-					scheduling.NewRequirement(
-						corev1.LabelTopologyZone,
-						corev1.NodeSelectorOpIn,
-						"syd",
-					),
-				),
-				Price:     price,
-				Available: available,
-			},
-		},
+		Overhead: &karpcloud.InstanceTypeOverhead{},
+		Offerings: karpcloud.Offerings{{
+			Requirements: scheduling.NewRequirements(
+				scheduling.NewRequirement(karpv1.CapacityTypeLabelKey, corev1.NodeSelectorOpIn, karpv1.CapacityTypeOnDemand),
+				scheduling.NewRequirement(corev1.LabelTopologyRegion, corev1.NodeSelectorOpIn, "syd"),
+				scheduling.NewRequirement(corev1.LabelTopologyZone, corev1.NodeSelectorOpIn, "syd"),
+			),
+			Price: price, Available: available,
+		}},
 	}
 }
 
