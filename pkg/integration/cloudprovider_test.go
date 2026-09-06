@@ -29,6 +29,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	sigsyaml "sigs.k8s.io/yaml"
 
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -36,6 +38,7 @@ import (
 
 	vultrv1 "github.com/crob1140/karpenter-provider-vultr/pkg/apis/v1alpha1"
 	vultrprovider "github.com/crob1140/karpenter-provider-vultr/pkg/cloudprovider"
+	vultrcontrollers "github.com/crob1140/karpenter-provider-vultr/pkg/controllers"
 	"github.com/crob1140/karpenter-provider-vultr/pkg/vultr"
 )
 
@@ -127,7 +130,7 @@ func TestCloudProviderCreateAndDelete(t *testing.T) {
 		api.Client(),
 	)
 
-	provider := vultrprovider.New(kubeClient, vultrClient)
+	provider := vultrprovider.New(kubeClient, vultrClient, "integration-cluster")
 
 	nodeClass := &vultrv1.VultrNodeClass{
 		ObjectMeta: metav1.ObjectMeta{
@@ -343,6 +346,58 @@ func TestCloudProviderCreateAndDelete(t *testing.T) {
 			"expected instance-123 to be deleted, got %q",
 			deleteID,
 		)
+	}
+}
+
+// TestControllersRegisterWithManager guards the provider's startup path.
+// cmd/controller panics if either controller fails to register, and
+// controller-runtime rejects a controller with no configured watches, so a
+// missing event source here means the whole provider fails to boot.
+func TestControllersRegisterWithManager(t *testing.T) {
+	if os.Getenv("VULTR_INTEGRATION_TESTS") != "1" {
+		t.Skip("set VULTR_INTEGRATION_TESTS=1 to run envtest integration tests")
+	}
+
+	scheme := k8sruntime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := vultrv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	testEnv := &envtest.Environment{
+		CRDDirectoryPaths:     []string{crdPath(t)},
+		ErrorIfCRDPathMissing: true,
+	}
+	cfg, err := testEnv.Start()
+	if err != nil {
+		t.Fatalf("starting envtest: %v", err)
+	}
+	defer func() {
+		if err := testEnv.Stop(); err != nil {
+			t.Errorf("stopping envtest: %v", err)
+		}
+	}()
+
+	mgr, err := manager.New(cfg, manager.Options{
+		Scheme:         scheme,
+		LeaderElection: false,
+		Metrics:        metricsserver.Options{BindAddress: "0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	api := newFakeVultrAPI()
+	defer api.Close()
+	vultrClient := vultr.NewClientWithBaseURL("integration-test-key", api.URL+"/v2", api.Client())
+
+	if err := vultrcontrollers.NewNodeClassController(mgr.GetClient(), vultrClient).SetupWithManager(mgr); err != nil {
+		t.Fatalf("registering the VultrNodeClass controller: %v", err)
+	}
+	if err := vultrcontrollers.NewOrphanController(mgr.GetClient(), vultrClient, "integration-cluster").SetupWithManager(mgr); err != nil {
+		t.Fatalf("registering the orphan cleaner: %v", err)
 	}
 }
 

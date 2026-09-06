@@ -44,10 +44,26 @@ Vultr documents Cloud-Init as the supported mechanism for initialization and not
 - Karpenter v1.12.1
 - Kubernetes 1.35 (the repository's current target)
 - A **self-managed kubeadm cluster**
+- The `karpenter.sh` CRDs (`NodePool`, `NodeClaim`, `NodeOverlay`) installed from the matching Karpenter release — this binary embeds Karpenter's core controllers but does not ship their CRDs
 - Vultr Cloud Controller Manager configured for an external cloud provider
 - Linux Vultr image; the examples use Ubuntu OS ID `1743`
 - A Kubernetes API endpoint reachable from the Vultr worker subnet
 - `kube-system/kube-root-ca.crt` available, unless `spec.caCertHash` is explicitly configured
+
+### Required configuration
+
+| Environment variable | Purpose |
+| --- | --- |
+| `VULTR_API_KEY` | Vultr API key used for all compute operations. |
+| `CLUSTER_NAME` | Scopes Vultr instance ownership to this Karpenter installation. |
+
+`CLUSTER_NAME` is mandatory and the controller refuses to start without it.
+Vultr instances carry no cluster identity of their own, so every instance this
+provider creates is tagged `karpenter-cluster=<CLUSTER_NAME>`, and `List`, drift
+reconciliation and orphan cleanup only ever consider instances carrying that
+exact tag. **Two Karpenter installations sharing one Vultr account must use
+different values**, otherwise each would treat the other's instances as its own
+and delete them.
 
 Kubernetes 1.35's package repository is minor-version specific. The bootstrapper accepts `v1.35` and installs the current patch from the v1.35 repository. As of 5 September 2026, Kubernetes 1.35.8 is the latest released patch in that series.
 
@@ -108,12 +124,16 @@ spec:
 
 ## RBAC
 
-The provider's ServiceAccount needs:
+This binary embeds Karpenter's own core controllers, so its ServiceAccount needs
+Karpenter's full core RBAC in addition to the provider-specific rules:
 
-- read/list access to the managed bootstrap token Secrets
-- create access to bootstrap token Secrets
+- Karpenter core: `nodepools`, `nodeclaims`, `nodeoverlays` (plus status and
+  finalizers), `nodes`, `pods`, `pods/eviction`, PV/PVC and storage topology,
+  workload owners (`apps`), `poddisruptionbudgets`, `events`
+- leader-election `leases` in the controller's namespace
+- read/list/watch and create access to the managed bootstrap token Secrets
 - read access to `kube-system/kube-root-ca.crt`
-- the existing VultrNodeClass permissions
+- the VultrNodeClass permissions
 
 Apply:
 
@@ -145,10 +165,20 @@ For a new NodeClaim:
 7. Cloud-Init installs/configures containerd.
 8. Cloud-Init installs `kubeadm` and `kubelet` from the configured Kubernetes minor repository.
 9. Swap is disabled and Kubernetes networking sysctls are configured.
-10. `kubeadm join` performs CA-pinned discovery and TLS bootstrap.
-11. The kubelet registers with `--cloud-provider=external`.
-12. Vultr CCM initializes the node and supplies Vultr-specific node metadata/provider ID.
-13. Karpenter observes the NodeClaim's node and continues normal lifecycle management.
+10. `/etc/default/kubelet` is written with the node's `KUBELET_EXTRA_ARGS`.
+11. `kubeadm join` performs CA-pinned discovery and TLS bootstrap.
+12. The kubelet registers with `--cloud-provider=external` and Karpenter's
+    `karpenter.sh/unregistered:NoExecute` startup taint.
+13. Vultr CCM initializes the node and supplies Vultr-specific node metadata/provider ID.
+14. Karpenter matches the Node to its NodeClaim by `spec.providerID`, syncs
+    labels and taints onto it, and removes the startup taint.
+
+`kubeadm join` has no flag for passing kubelet arguments, so `--cloud-provider`
+and `--register-with-taints` are supplied through `/etc/default/kubelet`, which
+the kubeadm systemd drop-in sources and appends last. A failed join is reset with
+`kubeadm reset --force` before each retry, because a partially completed join
+otherwise makes every subsequent attempt fail preflight rather than retrying the
+original transient error.
 
 ## Important security consideration
 
@@ -185,6 +215,7 @@ This checklist records the provider's **current implementation status**, rather 
 - [x] Instance deletion
 - [x] Idempotent handling of already-deleted Vultr instances
 - [x] Managed-instance identification using Karpenter tags
+- [x] Per-cluster instance ownership scoping via `CLUSTER_NAME`
 - [x] Orphan-instance cleanup for instances whose NodeClaim disappears
 - [x] NodeClass drift detection
 - [ ] Real-cluster end-to-end provisioning and termination validation
@@ -253,6 +284,7 @@ This checklist records the provider's **current implementation status**, rather 
 - [x] API error translation for common lifecycle operations
 - [x] Kubernetes envtest lifecycle coverage using a fake Vultr API
 - [x] Automated envtest integration test in CI
+- [x] Startup wiring test that both provider controllers register with the manager
 - [ ] Real Vultr/Kubernetes integration test suite
 - [ ] Automated end-to-end provisioning test against real Vultr capacity in CI
 - [ ] Documented upgrade/compatibility policy for supported Kubernetes and Karpenter versions
@@ -260,6 +292,28 @@ This checklist records the provider's **current implementation status**, rather 
 - [ ] Prometheus metrics and provider-specific operational dashboards
 
 > **Production-readiness note:** this project should not be considered production-ready solely because the automated tests pass. The remaining unchecked lifecycle and integration items are intentionally tracked here until they have been exercised against a real Vultr-backed Kubernetes cluster.
+
+### Assumptions to verify on the first real deployment
+
+These are behaviours the code depends on that could not be confirmed from
+documentation or SDK source alone. Check them first when testing against a real
+Vultr account:
+
+- **`=` in Vultr tags.** Ownership metadata is encoded as `karpenter-cluster=<name>`.
+  Vultr does not publish a tag character set, and `cluster-api-provider-vultr`
+  uses `:` as its separator (`sigs-k8s-io:capvultr:<cluster>`). If Vultr rejects
+  or rewrites `=`, instance creation fails or every instance becomes invisible to
+  `List` and the orphan cleaner — switch the separator in `pkg/vultr/tags.go`.
+- **containerd version.** The bootstrap installs Ubuntu's distribution
+  `containerd` package. Confirm it is recent enough for the target Kubernetes
+  minor; if not, install `containerd.io` from Docker's repository instead.
+- **Ubuntu OS ID `1743`.** The examples assume this is a current amd64 Ubuntu
+  image. The NodeClass controller validates existence and architecture, but the
+  ID itself should be re-checked against `GET /v2/os`.
+- **Plan universe.** `GET /v2/plans` returns every non-bare-metal plan family,
+  including GPU plans. Nothing filters those out; cheapest-first selection means
+  they are unlikely to be chosen, but a NodePool that explicitly requests one
+  gets no GPU resources advertised.
 
 ## Files
 
@@ -282,7 +336,7 @@ Karpenter v1.12.1 already contains the authoritative NodeClaim launch and regist
 4. Karpenter's normal node termination path calls this provider's `Delete`.
 5. `Delete` now translates a Vultr HTTP 404 into Karpenter's `NodeClaimNotFoundError`, allowing termination to complete cleanly.
 
-There is also a provider-specific orphan controller. It scans only instances carrying the provider's `karpenter-nodeclaim=<name>` tag. If the corresponding NodeClaim no longer exists and the Vultr instance is older than 20 minutes, the controller deletes it. This protects the narrow failure window where the Vultr API successfully creates an instance but the NodeClaim cannot subsequently be persisted or observed. It deliberately does **not** delete instances whose NodeClaim still exists, including NodeClaims currently being terminated, so it does not race Karpenter's normal lifecycle controller.
+There is also a provider-specific orphan controller. It scans only instances carrying **both** the provider's `karpenter-cluster=<CLUSTER_NAME>` tag and a `karpenter-nodeclaim=<name>` tag. If the corresponding NodeClaim no longer exists and the Vultr instance is older than 20 minutes, the controller deletes it. This protects the narrow failure window where the Vultr API successfully creates an instance but the NodeClaim cannot subsequently be persisted or observed. It deliberately does **not** delete instances whose NodeClaim still exists, including NodeClaims currently being terminated, so it does not race Karpenter's normal lifecycle controller.
 
 The 20-minute orphan grace period is intentionally longer than the expected node registration window. It should be shortened only after measuring real bootstrap times in the target Vultr region/image.
 
@@ -329,7 +383,8 @@ The Vultr instance ID cannot be inserted into user data before instance creation
 The Vultr API integration treats Karpenter's `CloudProvider` as the source of truth for
 normal NodeClaim lifecycle operations. The provider now:
 
-- follows Vultr cursor pagination for instance and plan lists (up to 500 objects/page)
+- follows Vultr cursor pagination for instance, plan and OS lists (up to 500 objects/page). Vultr's `meta.links.next` is an **opaque cursor token**, not a URL, and is sent straight back as `?cursor=<token>`
+- uses Vultr's documented create-instance field names: `sshkey_id` for SSH keys and `attach_vpc` for VPC attachment. Vultr ignores unknown fields, so the wrong names produce an instance with no keys and no VPC rather than an API error
 - treats `/plans` as the plan catalogue, not as proof that a plan is deployable in every region
 - queries `/regions/{region}/availability` for the regional set of currently deployable plans
 - keeps every valid plan in Karpenter's instance-type universe while setting `Offering.Available` from the regional availability result

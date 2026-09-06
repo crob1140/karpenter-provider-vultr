@@ -258,16 +258,37 @@ func (c *Client) ListInstances(ctx context.Context) ([]Instance, error) {
 	}
 }
 
+// cursorFromNext resolves the value to send as the `cursor` query parameter for
+// the next page.
+//
+// Vultr's `meta.links.next` is an opaque cursor token (for example
+// "bmV4dF9fMTMxOTgxNQ=="), not a URL, and it is passed straight back as
+// `?cursor=<token>`. An absolute URL carrying a `cursor` parameter is also
+// accepted so that a future API change to link-style pagination keeps working.
 func cursorFromNext(next string) string {
-	u, err := url.Parse(next)
-	if err != nil {
+	next = strings.TrimSpace(next)
+	if next == "" {
 		return ""
 	}
-	return u.Query().Get("cursor")
+	if u, err := url.Parse(next); err == nil && u.IsAbs() {
+		if cursor := u.Query().Get("cursor"); cursor != "" {
+			return cursor
+		}
+	}
+	return next
 }
 
 func (c *Client) CreateInstance(ctx context.Context, req CreateInstanceRequest) (*Instance, error) {
-	payload := map[string]any{"region": req.Region, "plan": req.Plan, "hostname": req.Hostname, "label": req.Label, "sshkey_ids": req.SSHKeyIDs, "vpc_ids": req.VPCIDs, "enable_ipv6": req.EnableIPv6, "tags": req.Tags}
+	payload := map[string]any{"region": req.Region, "plan": req.Plan, "hostname": req.Hostname, "label": req.Label, "enable_ipv6": req.EnableIPv6, "tags": req.Tags}
+	// Vultr names these fields `sshkey_id` and `attach_vpc`, both arrays of IDs.
+	// Sending `sshkey_ids`/`vpc_ids` is silently ignored by the API, which
+	// produces instances with no SSH keys and no VPC attachment.
+	if len(req.SSHKeyIDs) > 0 {
+		payload["sshkey_id"] = req.SSHKeyIDs
+	}
+	if len(req.VPCIDs) > 0 {
+		payload["attach_vpc"] = req.VPCIDs
+	}
 	if req.UserData != "" {
 		payload["user_data"] = base64.StdEncoding.EncodeToString([]byte(req.UserData))
 	}

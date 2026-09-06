@@ -39,7 +39,7 @@ func TestSelectPlanIntersectsMultiPlanNodeClaimRequirementAndAvailability(t *tes
 	}))
 	defer server.Close()
 
-	provider := New(nil, vultr.NewClientWithBaseURL("test", server.URL+"/v2", server.Client()))
+	provider := New(nil, vultr.NewClientWithBaseURL("test", server.URL+"/v2", server.Client()), "test-cluster")
 	requirements := scheduling.NewRequirements(scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, "cheap", "expensive"))
 
 	selected, plan, err := provider.selectPlan(context.Background(), "syd", requirements, "")
@@ -68,7 +68,7 @@ func TestSelectPlanNeverChoosesUnavailablePlan(t *testing.T) {
 	}))
 	defer server.Close()
 
-	provider := New(nil, vultr.NewClientWithBaseURL("test", server.URL+"/v2", server.Client()))
+	provider := New(nil, vultr.NewClientWithBaseURL("test", server.URL+"/v2", server.Client()), "test-cluster")
 	requirements := scheduling.NewRequirements(scheduling.NewRequirement(corev1.LabelInstanceTypeStable, corev1.NodeSelectorOpIn, "cheap", "available"))
 
 	selected, _, err := provider.selectPlan(context.Background(), "syd", requirements, "")

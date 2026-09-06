@@ -8,8 +8,10 @@ build:
 test:
 	go test ./...
 
+# The envtest suite is opt-in. Without VULTR_INTEGRATION_TESTS=1 every test in
+# it skips, so set it here rather than relying on the caller.
 test-integration:
-	go test ./pkg/integration/...
+	VULTR_INTEGRATION_TESTS=1 go test ./pkg/integration/...
 
 generate:
 	$(CONTROLLER_GEN) object paths="./pkg/apis/..."

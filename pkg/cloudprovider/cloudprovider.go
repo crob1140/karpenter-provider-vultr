@@ -26,16 +26,22 @@ import (
 var _ karpcloud.CloudProvider = (*CloudProvider)(nil)
 
 type CloudProvider struct {
-	kubeClient    client.Client
-	vultr         *vultr.Client
+	kubeClient client.Client
+	vultr      *vultr.Client
+	// clusterName scopes every instance this provider creates, lists or
+	// deletes. Vultr has no per-cluster boundary of its own, so without it two
+	// Karpenter installations sharing an account would garbage-collect each
+	// other's nodes.
+	clusterName   string
 	tokenProvider *bootstrap.TokenProvider
 	instanceTypes *vultr.InstanceTypeProvider
 }
 
-func New(kubeClient client.Client, vultrClient *vultr.Client) *CloudProvider {
+func New(kubeClient client.Client, vultrClient *vultr.Client, clusterName string) *CloudProvider {
 	return &CloudProvider{
 		kubeClient:    kubeClient,
 		vultr:         vultrClient,
+		clusterName:   clusterName,
 		tokenProvider: bootstrap.NewTokenProvider(kubeClient),
 		instanceTypes: vultr.NewInstanceTypeProvider(vultrClient),
 	}
@@ -115,11 +121,7 @@ func (c *CloudProvider) Create(ctx context.Context, nc *karpv1.NodeClaim) (*karp
 		VPCIDs:     nodeClass.Spec.VPCIDs,
 		UserData:   userData,
 		EnableIPv6: nodeClass.Spec.EnableIPv6 != nil && *nodeClass.Spec.EnableIPv6,
-		Tags: []string{
-			fmt.Sprintf("karpenter-nodeclaim=%s", nc.Name),
-			fmt.Sprintf("karpenter-nodepool=%s", nc.Labels[karpv1.NodePoolLabelKey]),
-			fmt.Sprintf("karpenter-nodeclass=%s", nodeClass.Name),
-		},
+		Tags:       vultr.InstanceTags(c.clusterName, nc.Name, nc.Labels[karpv1.NodePoolLabelKey], nodeClass.Name),
 	})
 	if err != nil {
 		return nil, classifyCreateError(err)
@@ -228,7 +230,7 @@ func (c *CloudProvider) List(ctx context.Context) ([]*karpv1.NodeClaim, error) {
 	}
 	out := make([]*karpv1.NodeClaim, 0, len(instances))
 	for i := range instances {
-		if !managed(&instances[i]) {
+		if _, ok := vultr.NodeClaimName(&instances[i], c.clusterName); !ok {
 			continue
 		}
 		out = append(out, c.hydrateInstanceNodeClaim(ctx, &instances[i], nil))
@@ -275,22 +277,17 @@ func parseProviderID(providerID string) (string, error) {
 	return strings.TrimPrefix(providerID, prefix), nil
 }
 
-func managed(i *vultr.Instance) bool {
-	for _, t := range i.Tags {
-		if strings.HasPrefix(t, "karpenter-nodeclaim=") {
-			return true
-		}
-	}
-	return false
-}
-
 func instanceToNodeClaim(i *vultr.Instance, original *karpv1.NodeClaim, nc *vultrv1.VultrNodeClass, plan *vultr.Plan) *karpv1.NodeClaim {
 	labels := map[string]string{
 		corev1.LabelInstanceTypeStable: i.Plan,
 		corev1.LabelTopologyRegion:     i.Region,
-		corev1.LabelArchStable:         "amd64",
-		corev1.LabelOSStable:           "linux",
-		karpv1.CapacityTypeLabelKey:    karpv1.CapacityTypeOnDemand,
+		// Vultr has no availability-zone dimension, so the region doubles as
+		// the provider's single synthetic zone. This must agree with the
+		// offering requirements published by the instance-type provider.
+		corev1.LabelTopologyZone:    i.Region,
+		corev1.LabelArchStable:      "amd64",
+		corev1.LabelOSStable:        "linux",
+		karpv1.CapacityTypeLabelKey: karpv1.CapacityTypeOnDemand,
 	}
 	if original != nil {
 		for key, value := range original.Labels {

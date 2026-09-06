@@ -1,3 +1,8 @@
+# Namespaced permissions.
+#
+# Bootstrap tokens are Secrets in kube-system, and the cluster CA hash is read
+# from the kube-root-ca.crt ConfigMap. Leader election leases live in the
+# namespace the controller runs in.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -6,8 +11,15 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "create"]
+    verbs: ["get", "list", "watch", "create"]
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: ["kube-root-ca.crt"]
     verbs: ["get"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "watch", "create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["karpenter-leader-election"]
+    verbs: ["update", "patch"]

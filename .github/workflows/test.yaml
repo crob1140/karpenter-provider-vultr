@@ -28,4 +28,7 @@ jobs:
       - name: Configure envtest
         run: echo "KUBEBUILDER_ASSETS=$(setup-envtest use -p path 1.35.x!)" >> "$GITHUB_ENV"
       - name: Run integration tests
+        # Without this the suite skips every test and the job passes vacuously.
+        env:
+          VULTR_INTEGRATION_TESTS: "1"
         run: make test-integration

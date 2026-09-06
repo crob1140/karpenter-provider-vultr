@@ -3,9 +3,9 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
+	"github.com/awslabs/operatorpkg/singleton"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -19,7 +19,6 @@ import (
 const (
 	orphanScanInterval = 5 * time.Minute
 	orphanGracePeriod  = 20 * time.Minute
-	nodeClaimTagPrefix = "karpenter-nodeclaim="
 )
 
 // OrphanController is a safety net for the narrow failure window between
@@ -29,13 +28,14 @@ const (
 // failures; this controller only removes instances that have lost their
 // NodeClaim entirely and have aged past the grace period.
 type OrphanController struct {
-	client client.Client
-	vultr  *vultr.Client
-	now    func() time.Time
+	client      client.Client
+	vultr       *vultr.Client
+	clusterName string
+	now         func() time.Time
 }
 
-func NewOrphanController(c client.Client, v *vultr.Client) *OrphanController {
-	return &OrphanController{client: c, vultr: v, now: time.Now}
+func NewOrphanController(c client.Client, v *vultr.Client, clusterName string) *OrphanController {
+	return &OrphanController{client: c, vultr: v, clusterName: clusterName, now: time.Now}
 }
 
 func (r *OrphanController) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
@@ -46,8 +46,10 @@ func (r *OrphanController) Reconcile(ctx context.Context, _ reconcile.Request) (
 
 	for i := range instances {
 		instance := &instances[i]
-		nodeClaimName, ok := managedNodeClaim(instance.Tags)
-		if !ok || nodeClaimName == "" {
+		// Only ever consider instances tagged for this specific Karpenter
+		// installation. Other clusters may share the Vultr account.
+		nodeClaimName, ok := vultr.NodeClaimName(instance, r.clusterName)
+		if !ok {
 			continue
 		}
 
@@ -78,21 +80,16 @@ func (r *OrphanController) Reconcile(ctx context.Context, _ reconcile.Request) (
 	return reconcile.Result{RequeueAfter: orphanScanInterval}, nil
 }
 
+// SetupWithManager registers the orphan cleaner as a singleton controller.
+//
+// controller-runtime rejects a controller with no configured watches
+// ("there are no watches configured, controller will never get triggered"), so
+// this uses the same singleton event source Karpenter's own periodic
+// controllers use: one synthetic event at startup, after which the reconciler's
+// RequeueAfter drives the scan interval.
 func (r *OrphanController) SetupWithManager(m manager.Manager) error {
 	return ctrl.NewControllerManagedBy(m).
 		Named("vultr-orphan-cleaner").
+		WatchesRawSource(singleton.Source()).
 		Complete(r)
-}
-
-func managedNodeClaim(tags []string) (string, bool) {
-	for _, tag := range tags {
-		if strings.HasPrefix(tag, nodeClaimTagPrefix) {
-			value := strings.TrimPrefix(tag, nodeClaimTagPrefix)
-			if value == "" || strings.ContainsAny(value, " \t\r\n") {
-				return "", false
-			}
-			return value, true
-		}
-	}
-	return "", false
 }

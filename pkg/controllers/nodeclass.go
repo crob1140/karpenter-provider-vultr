@@ -20,6 +20,12 @@ import (
 	"github.com/crob1140/karpenter-provider-vultr/pkg/vultr"
 )
 
+// nodeClassRefreshInterval bounds how stale the resolved regional plan
+// availability reported in status can become.
+const nodeClassRefreshInterval = 5 * time.Minute
+
+var caHashRE = regexp.MustCompile(`^sha256:[0-9a-fA-F]{64}$`)
+
 type NodeClassController struct {
 	client        client.Client
 	vultr         *vultr.Client
@@ -118,7 +124,10 @@ func (r *NodeClassController) Reconcile(ctx context.Context, req reconcile.Reque
 	if requeue {
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, nil
 	}
-	return reconcile.Result{}, nil
+	// Regional plan availability changes without the NodeClass spec changing,
+	// so re-resolve periodically instead of only on spec edits. Otherwise a
+	// NodeClass keeps reporting availability that Vultr has since withdrawn.
+	return reconcile.Result{RequeueAfter: nodeClassRefreshInterval}, nil
 }
 
 func (r *NodeClassController) SetupWithManager(m manager.Manager) error {
@@ -132,7 +141,7 @@ func validEndpoint(value string) bool {
 }
 
 func validCAHash(value string) bool {
-	return regexp.MustCompile(`^sha256:[0-9a-fA-F]{64}$`).MatchString(value)
+	return caHashRE.MatchString(value)
 }
 
 func isAMD64(arch string) bool {

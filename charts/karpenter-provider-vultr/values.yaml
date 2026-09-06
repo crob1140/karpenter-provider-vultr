@@ -1,3 +1,12 @@
+# Required. Scopes Vultr instance ownership to this Karpenter installation.
+# Vultr instances carry no cluster identity of their own, so every instance is
+# tagged with this name and the provider only ever lists, adopts or deletes
+# instances carrying it. Two Karpenter installations sharing one Vultr account
+# MUST use different values.
+clusterName: ""
+
+replicas: 1
+
 image:
   repository: ghcr.io/crob1140/karpenter-provider-vultr
   tag: dev
@@ -10,3 +19,8 @@ apiKeySecret:
 serviceAccount:
   create: true
   name: karpenter-provider-vultr
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi

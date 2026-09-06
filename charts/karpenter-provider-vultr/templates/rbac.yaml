@@ -1,48 +1,80 @@
+# This binary embeds Karpenter's own core controllers, so it needs Karpenter's
+# full core RBAC in addition to the VultrNodeClass permissions.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: karpenter-provider-vultr
 rules:
   - apiGroups: ["karpenter.vultr.com"]
-    resources: ["vultrnodeclasses", "vultrnodeclasses/status"]
+    resources: ["vultrnodeclasses"]
     verbs: ["get", "list", "watch", "patch", "update"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: karpenter-provider-vultr
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: karpenter-provider-vultr
-subjects:
-  - kind: ServiceAccount
-    name: {{ .Values.serviceAccount.name }}
-    namespace: kube-system
+  - apiGroups: ["karpenter.vultr.com"]
+    resources: ["vultrnodeclasses/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["karpenter.vultr.com"]
+    resources: ["vultrnodeclasses/finalizers"]
+    verbs: ["update"]
 
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: karpenter-provider-vultr-nodeclaim-read
-rules:
   - apiGroups: ["karpenter.sh"]
-    resources: ["nodeclaims"]
-    verbs: ["get"]
+    resources: ["nodepools", "nodeclaims", "nodeoverlays"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["karpenter.sh"]
+    resources: ["nodepools/status", "nodeclaims/status", "nodeoverlays/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["karpenter.sh"]
+    resources: ["nodepools/finalizers", "nodeclaims/finalizers"]
+    verbs: ["update"]
+
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["namespaces", "replicationcontrollers", "persistentvolumes", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
+  - apiGroups: ["apps"]
+    resources: ["daemonsets", "deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csinodes", "csidrivers", "csistoragecapacities", "volumeattachments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: karpenter-provider-vultr-nodeclaim-read
+  name: karpenter-provider-vultr
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: karpenter-provider-vultr-nodeclaim-read
+  name: karpenter-provider-vultr
 subjects:
   - kind: ServiceAccount
     name: {{ .Values.serviceAccount.name }}
     namespace: kube-system
-
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -52,11 +84,18 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "create"]
+    verbs: ["get", "list", "watch", "create"]
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: ["kube-root-ca.crt"]
     verbs: ["get"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "watch", "create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["karpenter-leader-election"]
+    verbs: ["update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -243,7 +243,9 @@ EOF
 sysctl --system
 
 retry apt-get update
-retry apt-get install -y ca-certificates curl gpg containerd
+# conntrack, socat and ethtool are kubeadm preflight requirements and are not
+# present on Vultr's minimal Ubuntu cloud images.
+retry apt-get install -y ca-certificates curl gpg containerd conntrack socat ethtool
 
 mkdir -p /etc/containerd
 containerd config default >/etc/containerd/config.toml
@@ -279,14 +281,43 @@ retry apt-get install -y kubelet kubeadm
 apt-mark hold kubelet kubeadm
 systemctl enable kubelet
 
+# kubeadm join accepts no flag for passing kubelet arguments. The kubeadm
+# systemd drop-in (/usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf) sources
+# /etc/default/kubelet and appends $KUBELET_EXTRA_ARGS last, which is the
+# supported way to add kubelet flags on a kubeadm-managed node.
+#
+# --cloud-provider=external hands node initialization to the Vultr CCM, which
+# assigns spec.providerID. karpenter.sh/unregistered:NoExecute is Karpenter's
+# startup taint: it keeps workloads off the node until Karpenter has finished
+# syncing NodeClaim labels/taints onto it, and Karpenter removes it during
+# registration.
+cat >/etc/default/kubelet <<'EOF'
+KUBELET_EXTRA_ARGS=--cloud-provider=external --register-with-taints=karpenter.sh/unregistered:NoExecute
+EOF
+
 # Token-based discovery is CA-pinned. kubeadm then uses the same short-lived
 # bootstrap token for TLS bootstrap and obtains a permanent client certificate.
-retry kubeadm join "$API_SERVER" \
-  --token "$BOOTSTRAP_TOKEN" \
-  --discovery-token-ca-cert-hash "$CA_CERT_HASH" \
-  --node-name "$NODE_NAME" \
-  --cri-socket unix:///run/containerd/containerd.sock \
-  --kubelet-extra-args="--cloud-provider=external"
+join_cluster() {
+  kubeadm join "$API_SERVER" \
+    --token "$BOOTSTRAP_TOKEN" \
+    --discovery-token-ca-cert-hash "$CA_CERT_HASH" \
+    --node-name "$NODE_NAME" \
+    --cri-socket unix:///run/containerd/containerd.sock
+}
+
+# A partially completed join leaves /etc/kubernetes and /var/lib/kubelet
+# populated, which makes every later attempt fail preflight instead of
+# retrying the transient failure. Reset before each retry.
+join_attempt=0
+until join_cluster; do
+  join_attempt=$((join_attempt + 1))
+  if [ "$join_attempt" -ge 5 ]; then
+    echo "kubeadm join failed after ${join_attempt} attempts" >&2
+    exit 1
+  fi
+  kubeadm reset --force --cri-socket unix:///run/containerd/containerd.sock || true
+  sleep $((join_attempt * 15))
+done
 
 if [ -n "$EXTRA_USER_DATA_B64" ]; then
   printf '%%s' "$EXTRA_USER_DATA_B64" | base64 -d >/run/karpenter-vultr-extra-bootstrap.sh

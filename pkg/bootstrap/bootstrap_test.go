@@ -55,6 +55,44 @@ func TestRender(t *testing.T) {
 	}
 }
 
+func TestRenderBootstrapScriptInvariants(t *testing.T) {
+	got, err := Render(BootstrapConfig{
+		KubernetesVersion: "v1.35",
+		ClusterEndpoint:   "https://k8s.example.com:6443",
+		CACertHash:        "sha256:" + strings.Repeat("a", 64),
+		NodeName:          "nodeclaim-abc123",
+	}, "abcdef.0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := decodeRenderedScript(got)
+
+	// `kubeadm join` has no --kubelet-extra-args flag; passing it makes every
+	// join fail with "unknown flag". Kubelet flags go through
+	// /etc/default/kubelet, which the kubeadm systemd drop-in sources.
+	if strings.Contains(script, "--kubelet-extra-args") {
+		t.Fatal("bootstrap script passes --kubelet-extra-args to kubeadm join, which is not a valid flag")
+	}
+	for _, want := range []string{
+		"/etc/default/kubelet",
+		"KUBELET_EXTRA_ARGS=--cloud-provider=external",
+		// Karpenter's startup taint keeps workloads off the node until
+		// registration has synced NodeClaim labels and taints onto it.
+		"--register-with-taints=karpenter.sh/unregistered:NoExecute",
+		// A partially completed join must be reset before retrying, otherwise
+		// every later attempt fails preflight instead of the transient error.
+		"kubeadm reset --force",
+		// kubeadm preflight requirements missing from minimal cloud images.
+		"conntrack",
+		"socat",
+		"ethtool",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("rendered bootstrap script does not contain %q", want)
+		}
+	}
+}
+
 func TestNormalizeEndpoint(t *testing.T) {
 	tests := map[string]string{
 		"https://k8s.example.com:6443": "k8s.example.com:6443",

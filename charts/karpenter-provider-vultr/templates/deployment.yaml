@@ -1,10 +1,13 @@
+{{- if not .Values.clusterName }}
+{{- fail "clusterName is required: it scopes Vultr instance ownership to this Karpenter installation. Two clusters sharing a Vultr account must use different values." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: karpenter-provider-vultr
   namespace: kube-system
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicas }}
   selector:
     matchLabels:
       app: karpenter-provider-vultr
@@ -24,3 +27,26 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.apiKeySecret.name }}
                   key: {{ .Values.apiKeySecret.key }}
+            # Scopes Vultr instance ownership to this Karpenter installation.
+            - name: CLUSTER_NAME
+              value: {{ .Values.clusterName | quote }}
+            - name: LEADER_ELECTION_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

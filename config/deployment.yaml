@@ -23,3 +23,26 @@ spec:
                 secretKeyRef:
                   name: vultr-api-key
                   key: api-key
+            # Scopes Vultr instance ownership to this Karpenter installation.
+            # Two clusters sharing one Vultr account MUST use different values,
+            # or each will garbage-collect the other's nodes.
+            - name: CLUSTER_NAME
+              value: "REPLACE_ME"
+            - name: LEADER_ELECTION_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
