@@ -298,6 +298,8 @@ This checklist records the provider's **current implementation status**, rather 
 - [x] Unit tests for plan selection, including deterministic tie-breaking when prices are equal
 - [x] Unit tests for API error translation across `Create`, `Get` and `Delete`
 - [x] Unit tests for instance ownership tagging and cluster scoping
+- [x] Unit tests for the VultrNodeClass controller — spec validation, OS image and
+      architecture checks, region/plan resolution, status conditions and requeue behaviour
 - [x] Scheduler and consolidation regression tests
 - [x] Kubernetes envtest lifecycle coverage using a fake Vultr API
 - [x] Startup wiring test that both provider controllers register with the manager
@@ -305,8 +307,6 @@ This checklist records the provider's **current implementation status**, rather 
 - [x] Standard Karpenter CloudProvider metrics (via `metrics.Decorate`)
 - [ ] **A recorded green run of the envtest suite.** It has never executed: the
       checked-in kubebuilder assets are Linux-only and CI skipped it until now
-- [ ] Unit tests for the VultrNodeClass controller — validation, OS architecture
-      checks, region resolution and status conditions are entirely uncovered
 - [ ] Unit tests for the orphan reconcile loop itself (only its tag helpers are covered)
 - [ ] Unit tests for `List` and `IsDrifted`
 - [ ] Real Vultr/Kubernetes integration test suite
