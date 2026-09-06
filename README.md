@@ -300,15 +300,17 @@ This checklist records the provider's **current implementation status**, rather 
 - [x] Unit tests for instance ownership tagging and cluster scoping
 - [x] Unit tests for the VultrNodeClass controller — spec validation, OS image and
       architecture checks, region/plan resolution, status conditions and requeue behaviour
+- [x] Unit tests for the orphan reconcile loop — cluster scoping, grace-period
+      boundary, live and terminating NodeClaims, and Vultr API failures
+- [x] Unit tests for `List` (cluster scoping, label/capacity hydration, unknown plans)
+      and `IsDrifted` (per-field NodeClass hash changes, missing annotation, deleted NodeClass)
 - [x] Scheduler and consolidation regression tests
 - [x] Kubernetes envtest lifecycle coverage using a fake Vultr API
 - [x] Startup wiring test that both provider controllers register with the manager
 - [x] Envtest suite wired to actually execute in CI
+- [x] Envtest suite verified green against a real kube-apiserver and etcd
+      (`docker compose -f docker-compose.integration-tests.yml run --rm integration-tests`)
 - [x] Standard Karpenter CloudProvider metrics (via `metrics.Decorate`)
-- [ ] **A recorded green run of the envtest suite.** It has never executed: the
-      checked-in kubebuilder assets are Linux-only and CI skipped it until now
-- [ ] Unit tests for the orphan reconcile loop itself (only its tag helpers are covered)
-- [ ] Unit tests for `List` and `IsDrifted`
 - [ ] Real Vultr/Kubernetes integration test suite
 - [ ] Automated end-to-end provisioning test against real Vultr capacity in CI
 - [ ] Documented upgrade/compatibility policy for supported Kubernetes and Karpenter versions
@@ -391,6 +393,17 @@ Run the envtest suite with Kubernetes test assets installed:
 ```bash
 make test-integration
 ```
+
+The checked-in kubebuilder assets are Linux-only, so on macOS or Windows run the
+suite in a container instead:
+
+```bash
+docker compose -f docker-compose.integration-tests.yml run --rm integration-tests
+```
+
+Note that envtest occasionally fails to bring up `etcd` under constrained
+container resources (`timeout waiting for process etcd to start successfully`).
+That is an environment flake, not a provider failure; re-run the suite.
 
 The CI workflow installs the controller-runtime `setup-envtest` helper and runs this integration suite automatically. The real Vultr E2E suite remains intentionally separate because it requires cloud credentials, a reachable Kubernetes control plane, and paid/real infrastructure.
 
