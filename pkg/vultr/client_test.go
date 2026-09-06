@@ -138,10 +138,10 @@ func TestListOSFollowsCursor(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Query().Get("cursor") == "b3NfX25leHQ=" {
-			w.Write([]byte(`{"os":[{"id":2,"name":"Ubuntu","arch":"x86_64","family":"ubuntu"}],"meta":{"links":{"next":""}}}`))
+			w.Write([]byte(`{"os":[{"id":2,"name":"Ubuntu","arch":"x64","family":"ubuntu"}],"meta":{"links":{"next":""}}}`))
 			return
 		}
-		w.Write([]byte(`{"os":[{"id":1,"name":"Ubuntu","arch":"x86_64","family":"ubuntu"}],"meta":{"links":{"next":"b3NfX25leHQ="}}}`))
+		w.Write([]byte(`{"os":[{"id":1,"name":"Ubuntu","arch":"x64","family":"ubuntu"}],"meta":{"links":{"next":"b3NfX25leHQ="}}}`))
 	}))
 	defer server.Close()
 	client := NewClientWithBaseURL("test", server.URL+"/v2", server.Client())

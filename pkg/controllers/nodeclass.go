@@ -144,9 +144,16 @@ func validCAHash(value string) bool {
 	return caHashRE.MatchString(value)
 }
 
+// isAMD64 reports whether a Vultr OS image runs on the 64-bit x86 workers this
+// provider supports.
+//
+// Vultr's /v2/os reports "x64" for these images; it does not use "amd64" or
+// "x86_64". Rejecting "x64" marks every osID-backed NodeClass
+// UnsupportedOSArchitecture, which makes Create fail with NodeClassNotReady and
+// no node is ever provisioned. The other spellings are accepted defensively.
 func isAMD64(arch string) bool {
 	switch strings.ToLower(arch) {
-	case "amd64", "x86_64", "x86-64":
+	case "x64", "amd64", "x86_64", "x86-64":
 		return true
 	default:
 		return false
