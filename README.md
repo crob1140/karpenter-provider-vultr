@@ -192,9 +192,16 @@ For higher-security environments, the next logical enhancement is an out-of-band
 
 This checklist records the provider's **current implementation status**, rather than the full set of features exposed by Karpenter. A checked item means the provider implements the capability; it does not necessarily mean that the capability has completed real-cluster production validation.
 
+> Items in **Operational readiness** are the exception: there a checked item means
+> the automated coverage exists and passes, not merely that the behaviour is
+> implemented.
+
 ### Core provisioning
 
 - [x] Karpenter v1.12.1 CloudProvider integration
+- [x] Karpenter core controllers embedded in this binary (provisioning, disruption,
+      NodeClaim lifecycle, cluster state). Their CRDs are **not** shipped here and
+      must be installed from the matching Karpenter release
 - [x] Dynamic NodePool provisioning from pending Pods
 - [x] VultrNodeClass resolution and readiness checks
 - [x] Vultr plan selection from NodePool/NodeClaim requirements
@@ -218,6 +225,13 @@ This checklist records the provider's **current implementation status**, rather 
 - [x] Per-cluster instance ownership scoping via `CLUSTER_NAME`
 - [x] Orphan-instance cleanup for instances whose NodeClaim disappears
 - [x] NodeClass drift detection
+- [ ] VultrNodeClass deletion protection: a NodeClass can be deleted while live
+      NodeClaims still reference it. Karpenter core ships no NodeClass controller,
+      so the finalizer is the provider's responsibility and this one has none
+- [ ] NodeClass hash versioning: `NodeClassHashVersion` is declared but unused,
+      so changing the hash function would drift every existing node at once
+- [ ] Handling for instances stuck in Vultr's intermediate teardown states —
+      only an outright HTTP 404 is translated to "gone"
 - [ ] Real-cluster end-to-end provisioning and termination validation
 - [ ] Real-cluster failure/retry testing across bootstrap and Vultr API failures
 
@@ -278,18 +292,28 @@ This checklist records the provider's **current implementation status**, rather 
 
 ### Operational readiness
 
-- [x] Unit tests for Vultr API and provider logic
-- [x] Scheduler regression tests
-- [x] Deterministic plan selection when prices tie
-- [x] API error translation for common lifecycle operations
+- [x] Unit tests for the Vultr API client (pagination, create-request field names)
+- [x] Unit tests for plan catalogue, regional availability, caching and pricing
+- [x] Unit tests for bootstrap rendering, token management and CA hashing
+- [x] Unit tests for plan selection, including deterministic tie-breaking when prices are equal
+- [x] Unit tests for API error translation across `Create`, `Get` and `Delete`
+- [x] Unit tests for instance ownership tagging and cluster scoping
+- [x] Scheduler and consolidation regression tests
 - [x] Kubernetes envtest lifecycle coverage using a fake Vultr API
-- [x] Automated envtest integration test in CI
 - [x] Startup wiring test that both provider controllers register with the manager
+- [x] Envtest suite wired to actually execute in CI
+- [x] Standard Karpenter CloudProvider metrics (via `metrics.Decorate`)
+- [ ] **A recorded green run of the envtest suite.** It has never executed: the
+      checked-in kubebuilder assets are Linux-only and CI skipped it until now
+- [ ] Unit tests for the VultrNodeClass controller — validation, OS architecture
+      checks, region resolution and status conditions are entirely uncovered
+- [ ] Unit tests for the orphan reconcile loop itself (only its tag helpers are covered)
+- [ ] Unit tests for `List` and `IsDrifted`
 - [ ] Real Vultr/Kubernetes integration test suite
 - [ ] Automated end-to-end provisioning test against real Vultr capacity in CI
 - [ ] Documented upgrade/compatibility policy for supported Kubernetes and Karpenter versions
 - [ ] Production deployment/upgrade runbook
-- [ ] Prometheus metrics and provider-specific operational dashboards
+- [ ] Provider-specific Prometheus metrics and operational dashboards
 
 > **Production-readiness note:** this project should not be considered production-ready solely because the automated tests pass. The remaining unchecked lifecycle and integration items are intentionally tracked here until they have been exercised against a real Vultr-backed Kubernetes cluster.
 
