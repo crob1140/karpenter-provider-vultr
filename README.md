@@ -122,6 +122,23 @@ spec:
 
 `extraUserData` runs only after `kubeadm join` succeeds.
 
+## NodeClass lifecycle
+
+`VultrNodeClass` carries a `karpenter.vultr.com/termination` finalizer. Deleting
+one blocks until every NodeClaim referencing it has terminated, because Karpenter
+resolves the NodeClass while draining those nodes and cannot do so once it is
+gone. Karpenter core ships no NodeClass controller, so this is the provider's
+responsibility.
+
+The controller also records `karpenter.vultr.com/nodeclass-hash` and
+`karpenter.vultr.com/nodeclass-hash-version` on the NodeClass, and `Create`
+stamps both onto every NodeClaim. Drift is evaluated **only** between a NodeClaim
+and a NodeClass that agree on the hash version. If a future change to the hashing
+scheme requires bumping `NodeClassHashVersion`, existing NodeClaims are migrated
+onto the new hash instead of being reported as drifted — otherwise upgrading the
+provider would replace every node in the cluster at once. A NodeClaim already
+marked `Drifted` keeps its old hash so that verdict is not silently cleared.
+
 ## RBAC
 
 This binary embeds Karpenter's own core controllers, so its ServiceAccount needs
@@ -225,13 +242,13 @@ This checklist records the provider's **current implementation status**, rather 
 - [x] Per-cluster instance ownership scoping via `CLUSTER_NAME`
 - [x] Orphan-instance cleanup for instances whose NodeClaim disappears
 - [x] NodeClass drift detection
-- [ ] VultrNodeClass deletion protection: a NodeClass can be deleted while live
-      NodeClaims still reference it. Karpenter core ships no NodeClass controller,
-      so the finalizer is the provider's responsibility and this one has none
-- [ ] NodeClass hash versioning: `NodeClassHashVersion` is declared but unused,
-      so changing the hash function would drift every existing node at once
-- [ ] Handling for instances stuck in Vultr's intermediate teardown states —
-      only an outright HTTP 404 is translated to "gone"
+- [x] VultrNodeClass deletion protection via a termination finalizer, so a
+      NodeClass cannot be removed while NodeClaims still reference it
+- [x] NodeClass hash versioning: drift is only evaluated between a NodeClaim and
+      a NodeClass recorded at the same `NodeClassHashVersion`, and stale
+      NodeClaims are migrated rather than replaced
+- [x] Teardown convergence: when Vultr rejects a delete, the instance itself is
+      consulted, so a NodeClaim cannot be wedged by a delete that never returns 404
 - [ ] Real-cluster end-to-end provisioning and termination validation
 - [ ] Real-cluster failure/retry testing across bootstrap and Vultr API failures
 

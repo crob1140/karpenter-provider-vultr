@@ -193,19 +193,41 @@ func classifyCreateError(err error) error {
 	return karpcloud.NewCreateError(err, "InstanceCreateFailed", "Vultr instance creation failed")
 }
 
+// Delete removes the Vultr instance backing a NodeClaim.
+//
+// Karpenter only releases the NodeClaim's termination finalizer once Delete
+// reports NodeClaimNotFoundError, and it re-calls Delete every few seconds
+// until then. A delete that keeps failing therefore wedges the NodeClaim
+// permanently, so the instance itself — not the status code of the delete
+// request — is the authority on whether teardown finished.
 func (c *CloudProvider) Delete(ctx context.Context, nc *karpv1.NodeClaim) error {
 	id, err := parseProviderID(nc.Status.ProviderID)
 	if err != nil {
 		return err
 	}
-	err = c.vultr.DeleteInstance(ctx, id)
-	if err != nil {
-		if apiErr, ok := err.(*vultr.APIError); ok && apiErr.NotFound() {
-			return karpcloud.NewNodeClaimNotFoundError(err)
-		}
-		return err
+
+	deleteErr := c.vultr.DeleteInstance(ctx, id)
+	if deleteErr == nil {
+		// Accepted. Karpenter calls Delete again shortly; once Vultr has
+		// finished destroying the instance the lookup below reports it gone.
+		return nil
 	}
-	return nil
+	if apiErr, ok := deleteErr.(*vultr.APIError); ok && apiErr.NotFound() {
+		return karpcloud.NewNodeClaimNotFoundError(deleteErr)
+	}
+
+	// Vultr rejects a delete while the instance is mid-operation, and it does
+	// not use a single documented status code for that. Confirm against the
+	// instance rather than trying to enumerate the failure modes: if it is
+	// already gone, the delete failure is moot and termination can complete.
+	if _, getErr := c.vultr.GetInstance(ctx, id); getErr != nil {
+		if apiErr, ok := getErr.(*vultr.APIError); ok && apiErr.NotFound() {
+			return karpcloud.NewNodeClaimNotFoundError(getErr)
+		}
+	}
+	// The instance is still there, or we could not tell. Surface the original
+	// delete failure so Karpenter retries and the operator sees the cause.
+	return deleteErr
 }
 
 func (c *CloudProvider) Get(ctx context.Context, providerID string) (*karpv1.NodeClaim, error) {

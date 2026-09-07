@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	karpcloud "sigs.k8s.io/karpenter/pkg/cloudprovider"
 
 	vultrv1 "github.com/crob1140/karpenter-provider-vultr/pkg/apis/v1alpha1"
 	"github.com/crob1140/karpenter-provider-vultr/pkg/vultr"
@@ -146,6 +147,134 @@ func TestListPropagatesAPIErrors(t *testing.T) {
 	provider := New(nil, vultr.NewClientWithBaseURL("test", server.URL+"/v2", server.Client()), "prod")
 	if _, err := provider.List(context.Background()); err == nil {
 		t.Fatal("expected a listing error, got nil")
+	}
+}
+
+// deleteTestAPI serves DELETE and GET for a single instance so teardown
+// convergence can be driven through each failure shape.
+type deleteTestAPI struct {
+	deleteStatus int // 0 = 204 No Content
+	getStatus    int // 0 = 200 with an instance body
+	deleteCalls  int
+	getCalls     int
+}
+
+func (a *deleteTestAPI) server(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodDelete:
+			a.deleteCalls++
+			if a.deleteStatus != 0 {
+				http.Error(w, "vultr rejected the delete", a.deleteStatus)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case http.MethodGet:
+			a.getCalls++
+			if a.getStatus != 0 {
+				http.Error(w, "vultr lookup failed", a.getStatus)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"instance":{"id":"i-1","plan":"vc2-1c-2gb","region":"syd"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func deleteNodeClaim() *karpv1.NodeClaim {
+	return &karpv1.NodeClaim{Status: karpv1.NodeClaimStatus{ProviderID: "vultr://i-1"}}
+}
+
+func TestDeleteConvergesOnTeardown(t *testing.T) {
+	tests := []struct {
+		name         string
+		api          deleteTestAPI
+		wantNotFound bool
+		wantErr      bool
+		wantGetCall  bool
+	}{
+		{
+			name: "delete accepted",
+			api:  deleteTestAPI{},
+			// Not "gone" yet: Karpenter re-calls until the instance disappears.
+		},
+		{
+			name:         "instance already deleted",
+			api:          deleteTestAPI{deleteStatus: http.StatusNotFound},
+			wantNotFound: true,
+		},
+		{
+			// The case that used to wedge a NodeClaim forever: Vultr refuses
+			// the delete, but the instance is in fact already gone.
+			name:         "delete rejected but instance is gone",
+			api:          deleteTestAPI{deleteStatus: http.StatusPreconditionFailed, getStatus: http.StatusNotFound},
+			wantNotFound: true,
+			wantGetCall:  true,
+		},
+		{
+			name:        "delete rejected and instance still present",
+			api:         deleteTestAPI{deleteStatus: http.StatusPreconditionFailed},
+			wantErr:     true,
+			wantGetCall: true,
+		},
+		{
+			name:        "delete rejected and lookup also fails",
+			api:         deleteTestAPI{deleteStatus: http.StatusInternalServerError, getStatus: http.StatusInternalServerError},
+			wantErr:     true,
+			wantGetCall: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := tt.api
+			server := api.server(t)
+			provider := New(nil, vultr.NewClientWithBaseURL("test", server.URL+"/v2", server.Client()), "prod")
+
+			err := provider.Delete(context.Background(), deleteNodeClaim())
+
+			switch {
+			case tt.wantNotFound:
+				if !karpcloud.IsNodeClaimNotFoundError(err) {
+					t.Fatalf("Delete() = %v, want NodeClaimNotFoundError so the finalizer can be released", err)
+				}
+			case tt.wantErr:
+				if err == nil || karpcloud.IsNodeClaimNotFoundError(err) {
+					t.Fatalf("Delete() = %v, want a retryable error", err)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("Delete() = %v, want nil", err)
+				}
+			}
+
+			if api.deleteCalls != 1 {
+				t.Errorf("delete calls = %d, want 1", api.deleteCalls)
+			}
+			// The instance lookup only happens when the delete failed; a
+			// successful delete must not cost an extra API call.
+			if got := api.getCalls > 0; got != tt.wantGetCall {
+				t.Errorf("instance lookup performed = %v, want %v", got, tt.wantGetCall)
+			}
+		})
+	}
+}
+
+func TestDeleteRejectsMalformedProviderID(t *testing.T) {
+	provider := New(nil, nil, "prod")
+	err := provider.Delete(context.Background(), &karpv1.NodeClaim{
+		Status: karpv1.NodeClaimStatus{ProviderID: "aws:///syd/i-1"},
+	})
+	if err == nil {
+		t.Fatal("expected a malformed provider ID to be rejected")
+	}
+	if karpcloud.IsNodeClaimNotFoundError(err) {
+		t.Fatal("a malformed provider ID must not be reported as a missing instance")
 	}
 }
 
