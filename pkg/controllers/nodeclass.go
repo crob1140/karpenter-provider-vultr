@@ -10,11 +10,16 @@ import (
 	"time"
 
 	"github.com/awslabs/operatorpkg/status"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
+	nodeclaimutils "sigs.k8s.io/karpenter/pkg/utils/nodeclaim"
 
 	vultrv1 "github.com/crob1140/karpenter-provider-vultr/pkg/apis/v1alpha1"
 	"github.com/crob1140/karpenter-provider-vultr/pkg/vultr"
@@ -23,6 +28,11 @@ import (
 // nodeClassRefreshInterval bounds how stale the resolved regional plan
 // availability reported in status can become.
 const nodeClassRefreshInterval = 5 * time.Minute
+
+// nodeClassTerminationPoll is how often a deleting VultrNodeClass re-checks
+// whether the NodeClaims using it have finished terminating. It only runs while
+// a deletion is actually blocked.
+const nodeClassTerminationPoll = 15 * time.Second
 
 var caHashRE = regexp.MustCompile(`^sha256:[0-9a-fA-F]{64}$`)
 
@@ -40,6 +50,12 @@ func (r *NodeClassController) Reconcile(ctx context.Context, req reconcile.Reque
 	nc := &vultrv1.VultrNodeClass{}
 	if err := r.client.Get(ctx, req.NamespacedName, nc); err != nil {
 		return reconcile.Result{}, client.IgnoreNotFound(err)
+	}
+	if !nc.DeletionTimestamp.IsZero() {
+		return r.finalize(ctx, nc)
+	}
+	if err := r.ensureFinalizer(ctx, nc); err != nil {
+		return reconcile.Result{}, err
 	}
 	before := nc.DeepCopy()
 	conds := nc.StatusConditions()
@@ -128,6 +144,52 @@ func (r *NodeClassController) Reconcile(ctx context.Context, req reconcile.Reque
 	// so re-resolve periodically instead of only on spec edits. Otherwise a
 	// NodeClass keeps reporting availability that Vultr has since withdrawn.
 	return reconcile.Result{RequeueAfter: nodeClassRefreshInterval}, nil
+}
+
+// ensureFinalizer adds the termination finalizer so that deleting a
+// VultrNodeClass cannot orphan the NodeClaims that reference it.
+func (r *NodeClassController) ensureFinalizer(ctx context.Context, nc *vultrv1.VultrNodeClass) error {
+	if controllerutil.ContainsFinalizer(nc, vultrv1.TerminationFinalizer) {
+		return nil
+	}
+	stored := nc.DeepCopy()
+	controllerutil.AddFinalizer(nc, vultrv1.TerminationFinalizer)
+	// MergeFromWithOptimisticLock: a JSON merge patch replaces the finalizer
+	// list wholesale, so concurrent writers must not silently drop each other's
+	// entries.
+	if err := r.client.Patch(ctx, nc, client.MergeFromWithOptions(stored, client.MergeFromWithOptimisticLock{})); err != nil {
+		return client.IgnoreNotFound(fmt.Errorf("adding termination finalizer: %w", err))
+	}
+	return nil
+}
+
+// finalize releases a deleted VultrNodeClass once nothing is using it. While
+// NodeClaims still reference the NodeClass the finalizer is held, which keeps
+// the object readable so Karpenter can continue to resolve and terminate them.
+func (r *NodeClassController) finalize(ctx context.Context, nc *vultrv1.VultrNodeClass) (reconcile.Result, error) {
+	if !controllerutil.ContainsFinalizer(nc, vultrv1.TerminationFinalizer) {
+		return reconcile.Result{}, nil
+	}
+
+	nodeClaims := &karpv1.NodeClaimList{}
+	if err := r.client.List(ctx, nodeClaims, nodeclaimutils.ForNodeClass(nc)); err != nil {
+		return reconcile.Result{}, fmt.Errorf("listing NodeClaims using VultrNodeClass %q: %w", nc.Name, err)
+	}
+	if len(nodeClaims.Items) > 0 {
+		log.FromContext(ctx).V(1).Info("waiting for NodeClaims to terminate before releasing VultrNodeClass",
+			"VultrNodeClass", nc.Name, "nodeclaims", len(nodeClaims.Items))
+		return reconcile.Result{RequeueAfter: nodeClassTerminationPoll}, nil
+	}
+
+	stored := nc.DeepCopy()
+	controllerutil.RemoveFinalizer(nc, vultrv1.TerminationFinalizer)
+	if err := r.client.Patch(ctx, nc, client.MergeFromWithOptions(stored, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			return reconcile.Result{RequeueAfter: time.Second}, nil
+		}
+		return reconcile.Result{}, client.IgnoreNotFound(fmt.Errorf("removing termination finalizer: %w", err))
+	}
+	return reconcile.Result{}, nil
 }
 
 func (r *NodeClassController) SetupWithManager(m manager.Manager) error {

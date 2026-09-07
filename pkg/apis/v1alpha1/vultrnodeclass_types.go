@@ -7,6 +7,17 @@ import (
 const (
 	ConditionReady          = "Ready"
 	NodeClassHashAnnotation = "karpenter.vultr.com/nodeclass-hash"
+
+	// NodeClassHashVersionAnnotation records which revision of the hash
+	// function produced NodeClassHashAnnotation. Drift is only evaluated
+	// between a NodeClaim and a NodeClass that agree on this value.
+	NodeClassHashVersionAnnotation = "karpenter.vultr.com/nodeclass-hash-version"
+
+	// TerminationFinalizer keeps a VultrNodeClass around until every NodeClaim
+	// using it has been terminated. Karpenter core ships no NodeClass
+	// controller, so without it a NodeClass can be deleted out from under
+	// running nodes and their NodeClaims can no longer be resolved.
+	TerminationFinalizer = "karpenter.vultr.com/termination"
 )
 
 // VultrNodeClassSpec contains provider-specific configuration used to create Vultr instances.

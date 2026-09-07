@@ -8,12 +8,16 @@ import (
 	"time"
 
 	"github.com/awslabs/operatorpkg/status"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 
 	vultrv1 "github.com/crob1140/karpenter-provider-vultr/pkg/apis/v1alpha1"
 	"github.com/crob1140/karpenter-provider-vultr/pkg/vultr"
@@ -86,18 +90,43 @@ func validNodeClass(mutate func(*vultrv1.VultrNodeClass)) *vultrv1.VultrNodeClas
 	return nc
 }
 
-func reconcileNodeClass(t *testing.T, nc *vultrv1.VultrNodeClass, api *httptest.Server) (client.Client, *vultrv1.VultrNodeClass, reconcile.Result, error) {
+// nodeClassScheme registers the provider API plus the Karpenter NodeClaim types
+// the termination path lists.
+func nodeClassScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
-
 	scheme := runtime.NewScheme()
 	if err := vultrv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	kubeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(nc).
+	gv := schema.GroupVersion{Group: "karpenter.sh", Version: "v1"}
+	scheme.AddKnownTypes(gv, &karpv1.NodeClaim{}, &karpv1.NodeClaimList{})
+	metav1.AddToGroupVersion(scheme, gv)
+	return scheme
+}
+
+// nodeClassClientBuilder mirrors the NodeClaim field indexes that
+// operator.NewOperator registers on the real manager cache. Without them
+// nodeclaimutils.ForNodeClass cannot resolve and every List fails.
+func nodeClassClientBuilder(t *testing.T) *fake.ClientBuilder {
+	t.Helper()
+	return fake.NewClientBuilder().
+		WithScheme(nodeClassScheme(t)).
 		WithStatusSubresource(&vultrv1.VultrNodeClass{}).
-		Build()
+		WithIndex(&karpv1.NodeClaim{}, "spec.nodeClassRef.group", func(o client.Object) []string {
+			return []string{o.(*karpv1.NodeClaim).Spec.NodeClassRef.Group}
+		}).
+		WithIndex(&karpv1.NodeClaim{}, "spec.nodeClassRef.kind", func(o client.Object) []string {
+			return []string{o.(*karpv1.NodeClaim).Spec.NodeClassRef.Kind}
+		}).
+		WithIndex(&karpv1.NodeClaim{}, "spec.nodeClassRef.name", func(o client.Object) []string {
+			return []string{o.(*karpv1.NodeClaim).Spec.NodeClassRef.Name}
+		})
+}
+
+func reconcileNodeClass(t *testing.T, nc *vultrv1.VultrNodeClass, api *httptest.Server) (client.Client, *vultrv1.VultrNodeClass, reconcile.Result, error) {
+	t.Helper()
+
+	kubeClient := nodeClassClientBuilder(t).WithObjects(nc).Build()
 
 	controller := NewNodeClassController(kubeClient, vultr.NewClientWithBaseURL("test", api.URL+"/v2", api.Client()))
 	result, err := controller.Reconcile(context.Background(), reconcile.Request{
@@ -369,15 +398,7 @@ func TestNodeClassReconcileValidatesRegionAndPlan(t *testing.T) {
 func TestNodeClassReconcileDoesNotWriteUnchangedStatus(t *testing.T) {
 	api := newVultrAPI(t, vultrAPIResponses{})
 
-	scheme := runtime.NewScheme()
-	if err := vultrv1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	kubeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(validNodeClass(nil)).
-		WithStatusSubresource(&vultrv1.VultrNodeClass{}).
-		Build()
+	kubeClient := nodeClassClientBuilder(t).WithObjects(validNodeClass(nil)).Build()
 
 	controller := NewNodeClassController(kubeClient, vultr.NewClientWithBaseURL("test", api.URL+"/v2", api.Client()))
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "default"}}
@@ -404,11 +425,7 @@ func TestNodeClassReconcileDoesNotWriteUnchangedStatus(t *testing.T) {
 }
 
 func TestNodeClassReconcileIgnoresDeletedNodeClass(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := vultrv1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	kubeClient := nodeClassClientBuilder(t).Build()
 
 	api := newVultrAPI(t, vultrAPIResponses{})
 	controller := NewNodeClassController(kubeClient, vultr.NewClientWithBaseURL("test", api.URL+"/v2", api.Client()))
@@ -421,6 +438,133 @@ func TestNodeClassReconcileIgnoresDeletedNodeClass(t *testing.T) {
 	}
 	if result.RequeueAfter != 0 {
 		t.Fatalf("RequeueAfter = %s, want 0", result.RequeueAfter)
+	}
+}
+
+func nodeClaimUsing(name, nodeClassName string) *karpv1.NodeClaim {
+	return &karpv1.NodeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: karpv1.NodeClaimSpec{
+			NodeClassRef: &karpv1.NodeClassReference{
+				Group: vultrv1.GroupVersion.Group,
+				Kind:  "VultrNodeClass",
+				Name:  nodeClassName,
+			},
+		},
+	}
+}
+
+func TestNodeClassReconcileAddsTerminationFinalizer(t *testing.T) {
+	api := newVultrAPI(t, vultrAPIResponses{})
+	_, updated, _, err := reconcileNodeClass(t, validNodeClass(nil), api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !controllerutil.ContainsFinalizer(updated, vultrv1.TerminationFinalizer) {
+		t.Fatalf("finalizers = %v, want %q", updated.Finalizers, vultrv1.TerminationFinalizer)
+	}
+}
+
+// Karpenter core ships no NodeClass controller, so nothing else stops a
+// VultrNodeClass from being deleted while nodes still depend on it. Losing it
+// mid-flight leaves those NodeClaims unresolvable.
+func TestNodeClassFinalizeBlocksWhileNodeClaimsExist(t *testing.T) {
+	api := newVultrAPI(t, vultrAPIResponses{})
+
+	nodeClass := validNodeClass(nil)
+	nodeClass.Finalizers = []string{vultrv1.TerminationFinalizer}
+	deletedAt := metav1.NewTime(time.Now())
+	nodeClass.DeletionTimestamp = &deletedAt
+
+	kubeClient := nodeClassClientBuilder(t).
+		WithObjects(nodeClass, nodeClaimUsing("default-abc12", "default")).
+		Build()
+
+	controller := NewNodeClassController(kubeClient, vultr.NewClientWithBaseURL("test", api.URL+"/v2", api.Client()))
+	result, err := controller.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "default"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter != nodeClassTerminationPoll {
+		t.Fatalf("RequeueAfter = %s, want %s", result.RequeueAfter, nodeClassTerminationPoll)
+	}
+
+	// The object must still be readable: Karpenter resolves the NodeClass while
+	// terminating the NodeClaims that reference it.
+	remaining := &vultrv1.VultrNodeClass{}
+	if err := kubeClient.Get(context.Background(), types.NamespacedName{Name: "default"}, remaining); err != nil {
+		t.Fatalf("VultrNodeClass was released while still in use: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(remaining, vultrv1.TerminationFinalizer) {
+		t.Fatal("termination finalizer was removed while NodeClaims still reference the NodeClass")
+	}
+}
+
+func TestNodeClassFinalizeReleasesWhenUnused(t *testing.T) {
+	api := newVultrAPI(t, vultrAPIResponses{})
+
+	nodeClass := validNodeClass(nil)
+	nodeClass.Finalizers = []string{vultrv1.TerminationFinalizer}
+	deletedAt := metav1.NewTime(time.Now())
+	nodeClass.DeletionTimestamp = &deletedAt
+
+	kubeClient := nodeClassClientBuilder(t).
+		WithObjects(nodeClass,
+			// References a different NodeClass, so it must not block this one.
+			nodeClaimUsing("other-abc12", "other")).
+		Build()
+
+	controller := NewNodeClassController(kubeClient, vultr.NewClientWithBaseURL("test", api.URL+"/v2", api.Client()))
+	result, err := controller.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "default"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("RequeueAfter = %s, want 0 once the NodeClass is released", result.RequeueAfter)
+	}
+
+	// Removing the last finalizer lets the API server complete the deletion.
+	remaining := &vultrv1.VultrNodeClass{}
+	err = kubeClient.Get(context.Background(), types.NamespacedName{Name: "default"}, remaining)
+	if err == nil && controllerutil.ContainsFinalizer(remaining, vultrv1.TerminationFinalizer) {
+		t.Fatal("termination finalizer was not removed for an unused NodeClass")
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		t.Fatal(err)
+	}
+}
+
+// A deleting NodeClass must not be reconciled as if it were live: re-adding the
+// finalizer after finalize removed it would wedge the deletion permanently.
+func TestNodeClassFinalizeDoesNotReaddFinalizer(t *testing.T) {
+	api := newVultrAPI(t, vultrAPIResponses{})
+
+	nodeClass := validNodeClass(nil)
+	nodeClass.Finalizers = []string{vultrv1.TerminationFinalizer, "example.com/other"}
+	deletedAt := metav1.NewTime(time.Now())
+	nodeClass.DeletionTimestamp = &deletedAt
+
+	kubeClient := nodeClassClientBuilder(t).WithObjects(nodeClass).Build()
+	controller := NewNodeClassController(kubeClient, vultr.NewClientWithBaseURL("test", api.URL+"/v2", api.Client()))
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "default"}}
+
+	for i := 0; i < 3; i++ {
+		if _, err := controller.Reconcile(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The second finalizer keeps the object alive so we can inspect it.
+	remaining := &vultrv1.VultrNodeClass{}
+	if err := kubeClient.Get(context.Background(), req.NamespacedName, remaining); err != nil {
+		t.Fatal(err)
+	}
+	if controllerutil.ContainsFinalizer(remaining, vultrv1.TerminationFinalizer) {
+		t.Fatalf("termination finalizer was re-added during deletion: %v", remaining.Finalizers)
 	}
 }
 
