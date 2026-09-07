@@ -568,6 +568,118 @@ func TestNodeClassFinalizeDoesNotReaddFinalizer(t *testing.T) {
 	}
 }
 
+func TestNodeClassReconcileRecordsHashAndVersion(t *testing.T) {
+	api := newVultrAPI(t, vultrAPIResponses{})
+	nodeClass := validNodeClass(nil)
+	wantHash := nodeClass.Hash()
+
+	_, updated, _, err := reconcileNodeClass(t, nodeClass, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.Annotations[vultrv1.NodeClassHashAnnotation]; got != wantHash {
+		t.Fatalf("hash annotation = %q, want %q", got, wantHash)
+	}
+	if got := updated.Annotations[vultrv1.NodeClassHashVersionAnnotation]; got != vultrv1.NodeClassHashVersion {
+		t.Fatalf("hash version annotation = %q, want %q", got, vultrv1.NodeClassHashVersion)
+	}
+}
+
+// When the hashing scheme changes, existing NodeClaims carry a hash that cannot
+// be compared against the new one. They are re-stamped so drift evaluation
+// resumes instead of every node being replaced at once.
+func TestNodeClassReconcileMigratesNodeClaimsOntoTheCurrentHashVersion(t *testing.T) {
+	api := newVultrAPI(t, vultrAPIResponses{})
+
+	nodeClass := validNodeClass(nil)
+	nodeClass.Annotations = map[string]string{
+		vultrv1.NodeClassHashAnnotation:        "hash-from-the-old-scheme",
+		vultrv1.NodeClassHashVersionAnnotation: "v0",
+	}
+	wantHash := nodeClass.Hash()
+
+	stale := nodeClaimUsing("default-abc12", "default")
+	stale.Annotations = map[string]string{
+		vultrv1.NodeClassHashAnnotation:        "hash-from-the-old-scheme",
+		vultrv1.NodeClassHashVersionAnnotation: "v0",
+	}
+	// Belongs to a different NodeClass and must be left untouched.
+	other := nodeClaimUsing("other-abc12", "other")
+	other.Annotations = map[string]string{
+		vultrv1.NodeClassHashAnnotation:        "hash-from-the-old-scheme",
+		vultrv1.NodeClassHashVersionAnnotation: "v0",
+	}
+
+	kubeClient := nodeClassClientBuilder(t).WithObjects(nodeClass, stale, other).Build()
+	controller := NewNodeClassController(kubeClient, vultr.NewClientWithBaseURL("test", api.URL+"/v2", api.Client()))
+
+	if _, err := controller.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "default"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated := &karpv1.NodeClaim{}
+	if err := kubeClient.Get(context.Background(), types.NamespacedName{Name: "default-abc12"}, migrated); err != nil {
+		t.Fatal(err)
+	}
+	if got := migrated.Annotations[vultrv1.NodeClassHashVersionAnnotation]; got != vultrv1.NodeClassHashVersion {
+		t.Fatalf("NodeClaim hash version = %q, want %q", got, vultrv1.NodeClassHashVersion)
+	}
+	// Adopting the current hash is what stops the upgrade looking like drift.
+	if got := migrated.Annotations[vultrv1.NodeClassHashAnnotation]; got != wantHash {
+		t.Fatalf("NodeClaim hash = %q, want the NodeClass's current hash %q", got, wantHash)
+	}
+
+	untouched := &karpv1.NodeClaim{}
+	if err := kubeClient.Get(context.Background(), types.NamespacedName{Name: "other-abc12"}, untouched); err != nil {
+		t.Fatal(err)
+	}
+	if untouched.Annotations[vultrv1.NodeClassHashVersionAnnotation] != "v0" {
+		t.Fatalf("a NodeClaim belonging to another NodeClass was migrated: %v", untouched.Annotations)
+	}
+}
+
+// A NodeClaim that was already judged drifted must stay drifted across the
+// migration: the new hash can neither confirm nor clear that verdict, and
+// adopting it would strand a node that should be replaced.
+func TestNodeClassMigrationKeepsAlreadyDriftedNodeClaimsDrifted(t *testing.T) {
+	api := newVultrAPI(t, vultrAPIResponses{})
+
+	nodeClass := validNodeClass(nil)
+	nodeClass.Annotations = map[string]string{vultrv1.NodeClassHashVersionAnnotation: "v0"}
+
+	drifted := nodeClaimUsing("default-abc12", "default")
+	drifted.Annotations = map[string]string{
+		vultrv1.NodeClassHashAnnotation:        "stale-hash",
+		vultrv1.NodeClassHashVersionAnnotation: "v0",
+	}
+	drifted.StatusConditions().SetTrue(karpv1.ConditionTypeDrifted)
+
+	kubeClient := nodeClassClientBuilder(t).
+		WithObjects(nodeClass, drifted).
+		WithStatusSubresource(&karpv1.NodeClaim{}).
+		Build()
+	controller := NewNodeClassController(kubeClient, vultr.NewClientWithBaseURL("test", api.URL+"/v2", api.Client()))
+
+	if _, err := controller.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "default"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated := &karpv1.NodeClaim{}
+	if err := kubeClient.Get(context.Background(), types.NamespacedName{Name: "default-abc12"}, migrated); err != nil {
+		t.Fatal(err)
+	}
+	if got := migrated.Annotations[vultrv1.NodeClassHashVersionAnnotation]; got != vultrv1.NodeClassHashVersion {
+		t.Fatalf("NodeClaim hash version = %q, want %q", got, vultrv1.NodeClassHashVersion)
+	}
+	if got := migrated.Annotations[vultrv1.NodeClassHashAnnotation]; got != "stale-hash" {
+		t.Fatalf("a drifted NodeClaim adopted the new hash (%q) and would silently stop being drifted", got)
+	}
+}
+
 func TestValidEndpoint(t *testing.T) {
 	valid := []string{"https://k8s.example.com:6443", "https://10.0.0.1:6443", "https://k8s.example.com"}
 	invalid := []string{"", "k8s.example.com:6443", "http://k8s.example.com:6443", "https://", "://nope"}

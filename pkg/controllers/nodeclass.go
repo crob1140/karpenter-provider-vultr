@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/awslabs/operatorpkg/status"
+	equality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -55,6 +57,9 @@ func (r *NodeClassController) Reconcile(ctx context.Context, req reconcile.Reque
 		return r.finalize(ctx, nc)
 	}
 	if err := r.ensureFinalizer(ctx, nc); err != nil {
+		return reconcile.Result{}, err
+	}
+	if err := r.syncHash(ctx, nc); err != nil {
 		return reconcile.Result{}, err
 	}
 	before := nc.DeepCopy()
@@ -161,6 +166,70 @@ func (r *NodeClassController) ensureFinalizer(ctx context.Context, nc *vultrv1.V
 		return client.IgnoreNotFound(fmt.Errorf("adding termination finalizer: %w", err))
 	}
 	return nil
+}
+
+// syncHash records the NodeClass's current hash and the revision of the hashing
+// scheme that produced it. When the scheme itself has changed it first
+// re-stamps the NodeClaims using this NodeClass, so that a provider upgrade
+// does not present every existing node as drifted and replace the fleet.
+func (r *NodeClassController) syncHash(ctx context.Context, nc *vultrv1.VultrNodeClass) error {
+	if nc.Annotations[vultrv1.NodeClassHashVersionAnnotation] != vultrv1.NodeClassHashVersion {
+		if err := r.migrateNodeClaimHashes(ctx, nc); err != nil {
+			return err
+		}
+	}
+
+	stored := nc.DeepCopy()
+	if nc.Annotations == nil {
+		nc.Annotations = map[string]string{}
+	}
+	// Hash() covers spec only, so writing these annotations cannot change it.
+	nc.Annotations[vultrv1.NodeClassHashAnnotation] = nc.Hash()
+	nc.Annotations[vultrv1.NodeClassHashVersionAnnotation] = vultrv1.NodeClassHashVersion
+	if equality.Semantic.DeepEqual(stored, nc) {
+		return nil
+	}
+	if err := r.client.Patch(ctx, nc, client.MergeFrom(stored)); err != nil {
+		return client.IgnoreNotFound(fmt.Errorf("recording VultrNodeClass hash: %w", err))
+	}
+	return nil
+}
+
+// migrateNodeClaimHashes moves NodeClaims onto the current hashing scheme.
+// Their recorded hash was produced by the previous scheme and cannot be
+// compared against the new one, so it is replaced rather than acted on.
+func (r *NodeClassController) migrateNodeClaimHashes(ctx context.Context, nc *vultrv1.VultrNodeClass) error {
+	nodeClaims := &karpv1.NodeClaimList{}
+	if err := r.client.List(ctx, nodeClaims, nodeclaimutils.ForNodeClass(nc)); err != nil {
+		return fmt.Errorf("listing NodeClaims using VultrNodeClass %q: %w", nc.Name, err)
+	}
+
+	hash := nc.Hash()
+	var errs []error
+	for i := range nodeClaims.Items {
+		claim := &nodeClaims.Items[i]
+		if claim.Annotations[vultrv1.NodeClassHashVersionAnnotation] == vultrv1.NodeClassHashVersion {
+			continue
+		}
+		stored := claim.DeepCopy()
+		if claim.Annotations == nil {
+			claim.Annotations = map[string]string{}
+		}
+		claim.Annotations[vultrv1.NodeClassHashVersionAnnotation] = vultrv1.NodeClassHashVersion
+		// A NodeClaim already judged drifted keeps its stale hash so it stays
+		// drifted. The new hash can neither confirm nor clear that verdict, and
+		// silently clearing it would strand a node that should be replaced.
+		if claim.StatusConditions().Get(karpv1.ConditionTypeDrifted) == nil {
+			claim.Annotations[vultrv1.NodeClassHashAnnotation] = hash
+		}
+		if equality.Semantic.DeepEqual(stored, claim) {
+			continue
+		}
+		if err := r.client.Patch(ctx, claim, client.MergeFrom(stored)); err != nil {
+			errs = append(errs, client.IgnoreNotFound(fmt.Errorf("re-stamping NodeClaim %q: %w", claim.Name, err)))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // finalize releases a deleted VultrNodeClass once nothing is using it. While

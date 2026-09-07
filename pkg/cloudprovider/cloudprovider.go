@@ -263,7 +263,17 @@ func (c *CloudProvider) IsDrifted(ctx context.Context, nc *karpv1.NodeClaim) (ka
 	if err != nil {
 		return "", client.IgnoreNotFound(err)
 	}
-	if nc.Annotations[vultrv1.NodeClassHashAnnotation] != nodeClass.Hash() {
+
+	hash, hashOK := nc.Annotations[vultrv1.NodeClassHashAnnotation]
+	version, versionOK := nc.Annotations[vultrv1.NodeClassHashVersionAnnotation]
+	// A NodeClaim carrying no hash, or one recorded under a different revision
+	// of the hashing scheme, cannot be compared. Reporting drift here would
+	// replace healthy nodes on nothing more than a provider upgrade, so leave
+	// them alone; the NodeClass controller re-stamps them and drift resumes.
+	if !hashOK || !versionOK || version != vultrv1.NodeClassHashVersion {
+		return "", nil
+	}
+	if hash != nodeClass.Hash() {
 		return karpcloud.DriftReason("VultrNodeClassDrifted"), nil
 	}
 	return "", nil
@@ -299,7 +309,10 @@ func instanceToNodeClaim(i *vultr.Instance, original *karpv1.NodeClaim, nc *vult
 		result.Status.ImageID = fmt.Sprintf("%d", i.OSID)
 	}
 	if nc != nil {
-		result.Annotations = map[string]string{vultrv1.NodeClassHashAnnotation: nc.Hash()}
+		result.Annotations = map[string]string{
+			vultrv1.NodeClassHashAnnotation:        nc.Hash(),
+			vultrv1.NodeClassHashVersionAnnotation: vultrv1.NodeClassHashVersion,
+		}
 	}
 	if plan != nil {
 		it := &karpcloud.InstanceType{

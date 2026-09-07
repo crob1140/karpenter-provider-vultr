@@ -187,7 +187,10 @@ func driftNodeClaim(hash string) *karpv1.NodeClaim {
 		},
 	}
 	if hash != "" {
-		nc.Annotations = map[string]string{vultrv1.NodeClassHashAnnotation: hash}
+		nc.Annotations = map[string]string{
+			vultrv1.NodeClassHashAnnotation:        hash,
+			vultrv1.NodeClassHashVersionAnnotation: vultrv1.NodeClassHashVersion,
+		}
 	}
 	return nc
 }
@@ -241,18 +244,53 @@ func TestIsDriftedDetectsSpecChanges(t *testing.T) {
 	}
 }
 
-// A NodeClaim launched before the annotation existed has no hash. Reporting
-// drift is the safe outcome: it replaces the node rather than leaving it
-// permanently unverifiable.
-func TestIsDriftedTreatsMissingAnnotationAsDrift(t *testing.T) {
+// A NodeClaim with no recorded hash cannot be compared against anything.
+// Absence of evidence is not drift: replacing a healthy node because an
+// annotation is missing is a worse failure than missing a drift, and the
+// NodeClass controller re-stamps these so drift resumes on the next pass.
+func TestIsDriftedIgnoresNodeClaimWithNoRecordedHash(t *testing.T) {
 	provider := driftTestProvider(t, driftNodeClass())
 
 	reason, err := provider.IsDrifted(context.Background(), driftNodeClaim(""))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reason != "VultrNodeClassDrifted" {
-		t.Fatalf("IsDrifted() = %q, want VultrNodeClassDrifted", reason)
+	if reason != "" {
+		t.Fatalf("IsDrifted() = %q, want no drift for an unhashed NodeClaim", reason)
+	}
+}
+
+// The whole point of the hash version: a NodeClaim hashed under an older scheme
+// must not be reported as drifted, or upgrading the provider would replace
+// every node in the cluster at once.
+func TestIsDriftedIgnoresStaleHashVersion(t *testing.T) {
+	nodeClass := driftNodeClass()
+	provider := driftTestProvider(t, nodeClass)
+
+	claim := driftNodeClaim("a-hash-from-the-old-scheme")
+	claim.Annotations[vultrv1.NodeClassHashVersionAnnotation] = "v0"
+
+	reason, err := provider.IsDrifted(context.Background(), claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason != "" {
+		t.Fatalf("IsDrifted() = %q, want no drift across a hash-version change", reason)
+	}
+}
+
+func TestIsDriftedRequiresAHashVersion(t *testing.T) {
+	provider := driftTestProvider(t, driftNodeClass())
+
+	claim := driftNodeClaim("some-hash")
+	delete(claim.Annotations, vultrv1.NodeClassHashVersionAnnotation)
+
+	reason, err := provider.IsDrifted(context.Background(), claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason != "" {
+		t.Fatalf("IsDrifted() = %q, want no drift when the hash version is unknown", reason)
 	}
 }
 
